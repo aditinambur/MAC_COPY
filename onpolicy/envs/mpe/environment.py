@@ -119,7 +119,7 @@ class MultiAgentEnv(gym.Env):
             np.random.seed(seed)
 
     # step  this is  env.step()
-    def step(self, action_n, reconstruction):
+    def step(self, action_n, reconstruction=None):
         self.current_step += 1
         obs_n = []
         reward_n = []
@@ -133,7 +133,7 @@ class MultiAgentEnv(gym.Env):
             #     self._set_action(action_n[i][:-world.env_size*world.env_size], agent, self.action_space[i])
             # else:
             self._set_action(action_n[i], agent, self.action_space[i])
-            if hasattr(self.world, 'use_GP') and self.world.use_GP == False:
+            if hasattr(self.world, 'use_GP') and self.world.use_GP == False and reconstruction is not None:
                 agent.state.A = reconstruction[i].reshape(self.world.env_size,self.world.env_size)
                 agent.state.A[agent.X_train[:,0], agent.X_train[:,1]] = agent.y_train
         # advance world state

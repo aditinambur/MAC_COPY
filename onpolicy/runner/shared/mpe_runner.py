@@ -96,14 +96,22 @@ class MPERunner(Runner):
     @torch.no_grad()
     def collect(self, step):
         self.trainer.prep_rollout()
-        value, action, action_log_prob, rnn_states, rnn_states_critic, reconstruction \
-            = self.trainer.policy.get_actions(np.concatenate(self.buffer.share_obs[step]),
+        policy_out = self.trainer.policy.get_actions(np.concatenate(self.buffer.share_obs[step]),
                             np.concatenate(self.buffer.obs[step]),
                             np.concatenate(self.buffer.rnn_states[step]),
                             np.concatenate(self.buffer.rnn_states_critic[step]),
                             np.concatenate(self.buffer.masks[step]))
+
+        if len(policy_out) == 6:
+            value, action, action_log_prob, rnn_states, rnn_states_critic, reconstruction = policy_out
+            reconstructions = np.array(np.split(_t2n(reconstruction), self.n_rollout_threads))
+        elif len(policy_out) == 5:
+            value, action, action_log_prob, rnn_states, rnn_states_critic = policy_out
+            reconstructions = None
+        else:
+            raise ValueError("Unexpected get_actions() output length: {}".format(len(policy_out)))
+
         # [self.envs, agents, dim]
-        reconstructions = np.array(np.split(_t2n(reconstruction), self.n_rollout_threads))
         values = np.array(np.split(_t2n(value), self.n_rollout_threads))
         actions = np.array(np.split(_t2n(action), self.n_rollout_threads))
         action_log_probs = np.array(np.split(_t2n(action_log_prob), self.n_rollout_threads))
@@ -150,10 +158,20 @@ class MPERunner(Runner):
 
         for eval_step in range(self.episode_length):
             self.trainer.prep_rollout()
-            eval_action, eval_rnn_states, reconstruction = self.trainer.policy.act(np.concatenate(eval_obs),
-                                                np.concatenate(eval_rnn_states),
-                                                np.concatenate(eval_masks),
-                                                deterministic=True)
+            eval_out = self.trainer.policy.act(np.concatenate(eval_obs),
+                                               np.concatenate(eval_rnn_states),
+                                               np.concatenate(eval_masks),
+                                               deterministic=True)
+
+            if len(eval_out) == 3:
+                eval_action, eval_rnn_states, reconstruction = eval_out
+                eval_reconstructions = np.array(np.split(_t2n(reconstruction), self.n_eval_rollout_threads))
+            elif len(eval_out) == 2:
+                eval_action, eval_rnn_states = eval_out
+                eval_reconstructions = None
+            else:
+                raise ValueError("Unexpected act() output length: {}".format(len(eval_out)))
+
             eval_actions = np.array(np.split(_t2n(eval_action), self.n_eval_rollout_threads))
             eval_rnn_states = np.array(np.split(_t2n(eval_rnn_states), self.n_eval_rollout_threads))
             
@@ -170,7 +188,7 @@ class MPERunner(Runner):
                 raise NotImplementedError
 
             # Obser reward and next obs
-            eval_obs, eval_rewards, eval_dones, eval_infos = self.eval_envs.step(eval_actions_env)
+            eval_obs, eval_rewards, eval_dones, eval_infos = self.eval_envs.step(eval_actions_env, eval_reconstructions)
             eval_episode_rewards.append(eval_rewards)
 
             eval_rnn_states[eval_dones == True] = np.zeros(((eval_dones == True).sum(), self.recurrent_N, self.hidden_size), dtype=np.float32)
@@ -180,7 +198,7 @@ class MPERunner(Runner):
         eval_episode_rewards = np.array(eval_episode_rewards)
         eval_env_infos = {}
         eval_env_infos['eval_average_episode_rewards'] = np.sum(np.array(eval_episode_rewards), axis=0)
-        print("eval average episode rewards of agent: " + str(eval_average_episode_rewards))
+        print("eval average episode rewards of agent: " + str(eval_env_infos['eval_average_episode_rewards']))
         self.log_env(eval_env_infos, total_num_steps)
 
     @torch.no_grad()
@@ -210,13 +228,22 @@ class MPERunner(Runner):
                 calc_start = time.time()
 
                 self.trainer.prep_rollout()
-                action, rnn_states, reconstruction = self.trainer.policy.act(np.concatenate(obs),
-                                                    np.concatenate(rnn_states),
-                                                    np.concatenate(masks),
-                                                    deterministic=True)
+                render_out = self.trainer.policy.act(np.concatenate(obs),
+                                                     np.concatenate(rnn_states),
+                                                     np.concatenate(masks),
+                                                     deterministic=True)
+
+                if len(render_out) == 3:
+                    action, rnn_states, reconstruction = render_out
+                    reconstructions = np.array(np.split(_t2n(reconstruction), self.n_rollout_threads))
+                elif len(render_out) == 2:
+                    action, rnn_states = render_out
+                    reconstructions = None
+                else:
+                    raise ValueError("Unexpected act() output length: {}".format(len(render_out)))
+
                 actions = np.array(np.split(_t2n(action), self.n_rollout_threads))
                 rnn_states = np.array(np.split(_t2n(rnn_states), self.n_rollout_threads))
-                reconstructions = np.array(np.split(_t2n(reconstruction), self.n_rollout_threads))
 
                 if envs.action_space[0].__class__.__name__ == 'MultiDiscrete':
                     for i in range(envs.action_space[0].shape):
