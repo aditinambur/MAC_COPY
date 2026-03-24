@@ -101,14 +101,25 @@ class R_MAPPO():
         :return actor_grad_norm: (torch.Tensor) gradient norm from actor update.
         :return imp_weights: (torch.Tensor) importance sampling weights.
         """
-        if len(sample) == 14:
+        if len(sample) == 15:
+            share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, \
+            value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, \
+            adv_targ, available_actions_batch, messages_batch, r_obs, f_obs = sample
+        elif len(sample) == 14:
             share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, \
             value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, \
             adv_targ, available_actions_batch, r_obs, f_obs = sample
+            messages_batch = None
+        elif len(sample) == 13:
+            share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, \
+            value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, \
+            adv_targ, available_actions_batch, messages_batch = sample
+            r_obs, f_obs = None, None
         elif len(sample) == 12:
             share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, \
             value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, \
             adv_targ, available_actions_batch = sample
+            messages_batch = None
             r_obs, f_obs = None, None
         else:
             raise ValueError("Unexpected sample length in ppo_update: {}".format(len(sample)))
@@ -127,7 +138,8 @@ class R_MAPPO():
                                                                               actions_batch, 
                                                                               masks_batch, 
                                                                               available_actions_batch,
-                                                                              active_masks_batch)
+                                                                              active_masks_batch,
+                                                                              messages=messages_batch)
         # actor update
         imp_weights = torch.exp(action_log_probs - old_action_log_probs_batch)
 

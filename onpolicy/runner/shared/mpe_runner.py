@@ -1,4 +1,5 @@
 import time
+import os
 import numpy as np
 import torch
 from onpolicy.runner.shared.base_runner import Runner
@@ -13,6 +14,13 @@ class MPERunner(Runner):
     def __init__(self, config):
         super(MPERunner, self).__init__(config)
         self.gif_dir = self.all_args.gif_dir if self.all_args.gif_dir is not None else '.'
+        self.message_log_dir = os.path.join(str(self.run_dir), "messages")
+        os.makedirs(self.message_log_dir, exist_ok=True)
+        
+        # Phase 3: Initialize message buffers
+        self.latest_messages = None
+        self.latest_shared_messages = None
+        self.action_input_shared_messages = None
 
     def run(self):
         self.warmup()   
@@ -27,6 +35,7 @@ class MPERunner(Runner):
             for step in range(self.episode_length):
                 # Sample actions
                 values, actions, action_log_probs, rnn_states, rnn_states_critic, actions_env, reconstructions = self.collect(step)
+                self._log_messages(episode, step)
                     
                 # Obser reward and next obs
                 obs, rewards, dones, infos = self.envs.step(actions_env, reconstructions)
@@ -79,9 +88,28 @@ class MPERunner(Runner):
             if episode % self.eval_interval == 0 and self.use_eval:
                 self.eval(total_num_steps)
 
+    def _log_messages(self, episode, step):
+        """Persist communication tensors for debugging under scripts/results/.../messages."""
+        messages = getattr(self, "latest_messages", None)
+        shared_messages = getattr(self, "latest_shared_messages", None)
+
+        if messages is None:
+            return
+
+        base = "episode_{:06d}_step_{:04d}".format(episode, step)
+        np.save(os.path.join(self.message_log_dir, base + "_messages.npy"), messages)
+        if shared_messages is not None:
+            np.save(os.path.join(self.message_log_dir, base + "_shared_messages.npy"), shared_messages)
+
     def warmup(self):
         # reset env
         obs = self.envs.reset()
+
+        # Phase 3: Initialize zero messages for the first step
+        # so agents can start using communication from step 0
+        message_dim = self.all_args.hidden_size  # Message embeddings have same dim as hidden layer
+        self.latest_shared_messages = np.zeros((self.n_rollout_threads, self.num_agents, self.num_agents, message_dim), 
+                                               dtype=np.float32)
 
         # replay buffer
         if self.use_centralized_V:
@@ -96,20 +124,55 @@ class MPERunner(Runner):
     @torch.no_grad()
     def collect(self, step):
         self.trainer.prep_rollout()
+        
+        # Phase 3: Reshape messages for actor input if available
+        messages_input = None
+        action_input_shared_messages = None
+        if hasattr(self, 'latest_shared_messages') and self.latest_shared_messages is not None:
+            # Keep the exact shared tensor used to pick this step's actions for PPO replay consistency.
+            action_input_shared_messages = self.latest_shared_messages.copy()
+            # latest_shared_messages shape: [n_envs, n_agents, n_agents, message_dim]
+            # Reshape for batched policy call: [n_envs*n_agents, n_agents, message_dim]
+            n_envs = self.latest_shared_messages.shape[0]
+            n_agents = self.latest_shared_messages.shape[1]
+            message_dim = self.latest_shared_messages.shape[3]
+            messages_input = self.latest_shared_messages.reshape(n_envs * n_agents, n_agents, message_dim)
+        
         policy_out = self.trainer.policy.get_actions(np.concatenate(self.buffer.share_obs[step]),
                             np.concatenate(self.buffer.obs[step]),
                             np.concatenate(self.buffer.rnn_states[step]),
                             np.concatenate(self.buffer.rnn_states_critic[step]),
-                            np.concatenate(self.buffer.masks[step]))
+                            np.concatenate(self.buffer.masks[step]),
+                            messages=messages_input)
+
+        messages = None
+        shared_messages = None
+        reconstructions = None
 
         if len(policy_out) == 6:
-            value, action, action_log_prob, rnn_states, rnn_states_critic, reconstruction = policy_out
-            reconstructions = np.array(np.split(_t2n(reconstruction), self.n_rollout_threads))
+            value, action, action_log_prob, rnn_states, rnn_states_critic, aux_output = policy_out
+            aux_np = _t2n(aux_output)
+
+            # Phase 2: treat 6th output as agent message by default.
+            # Keep compatibility for adaptive-sampling setups where the 6th output is reconstruction.
+            if self.all_args.scenario_name == "simple_adaptive_sampling" and aux_np.shape[-1] == self.all_args.env_size ** 2:
+                reconstructions = np.array(np.split(aux_np, self.n_rollout_threads))
+            else:
+                # [n_envs * n_agents, message_dim] -> [n_envs, n_agents, message_dim]
+                messages = np.array(np.split(aux_np, self.n_rollout_threads))
+                # [n_envs, n_agents, message_dim] -> [n_envs, n_agents, n_agents, message_dim]
+                # shared_messages[e][i] contains all agent messages within env e.
+                shared_messages = np.repeat(messages[:, None, :, :], self.num_agents, axis=1)
         elif len(policy_out) == 5:
             value, action, action_log_prob, rnn_states, rnn_states_critic = policy_out
-            reconstructions = None
         else:
+            
             raise ValueError("Unexpected get_actions() output length: {}".format(len(policy_out)))
+
+        # Optional debug visibility for message passing (not used by PPO update yet).
+        self.latest_messages = messages
+        self.latest_shared_messages = shared_messages
+        self.action_input_shared_messages = action_input_shared_messages
 
         # [self.envs, agents, dim]
         values = np.array(np.split(_t2n(value), self.n_rollout_threads))
@@ -146,7 +209,8 @@ class MPERunner(Runner):
         else:
             share_obs = obs
 
-        self.buffer.insert(share_obs, obs, rnn_states, rnn_states_critic, actions, action_log_probs, values, rewards, masks, reconstructions=reconstructions)
+        self.buffer.insert(share_obs, obs, rnn_states, rnn_states_critic, actions, action_log_probs, values, rewards, masks,
+                   reconstructions=reconstructions, shared_messages=self.action_input_shared_messages)
 
     @torch.no_grad()
     def eval(self, total_num_steps):

@@ -32,7 +32,17 @@ class R_Actor(nn.Module):
         obs_shape = get_shape_from_obs_space(obs_space)
         print(obs_shape)
         base = CNNBase if len(obs_shape) == 3 else MLPBase
-        self.base = base(args, obs_shape)
+
+        self._supports_message_concat = (base is MLPBase and len(obs_shape) == 1)
+        self.message_dim = self.hidden_size
+        self.obs_dim = int(obs_shape[0]) if len(obs_shape) == 1 else None
+
+        if self._supports_message_concat:
+            # Build encoder for [obs, message] concatenated input.
+            fused_obs_shape = (self.obs_dim + self.message_dim,)
+            self.base = base(args, fused_obs_shape)
+        else:
+            self.base = base(args, obs_shape)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             self.rnn = RNNLayer(self.hidden_size, self.hidden_size, self._recurrent_N, self._use_orthogonal)
@@ -41,7 +51,7 @@ class R_Actor(nn.Module):
 
         self.to(device)
 
-    def forward(self, obs, rnn_states, masks, available_actions=None, deterministic=False):
+    def forward(self, obs, rnn_states, masks, available_actions=None, deterministic=False, messages=None):
         """
         Compute actions from the given inputs.
         :param obs: (np.ndarray / torch.Tensor) observation inputs into network.
@@ -50,10 +60,13 @@ class R_Actor(nn.Module):
         :param available_actions: (np.ndarray / torch.Tensor) denotes which actions are available to agent
                                                               (if None, all actions available)
         :param deterministic: (bool) whether to sample from action distribution or return the mode.
+        :param messages: (torch.Tensor) messages from other agents with shape [batch_size, n_agents, message_dim].
+                           If provided, will be aggregated and used to modulate actor features.
 
         :return actions: (torch.Tensor) actions to take.
         :return action_log_probs: (torch.Tensor) log probabilities of taken actions.
         :return rnn_states: (torch.Tensor) updated RNN hidden states.
+        :return messages: (torch.Tensor) message embeddings for Phase 2 communication.
         """
         obs = check(obs).to(**self.tpdv)
         rnn_states = check(rnn_states).to(**self.tpdv)
@@ -61,16 +74,32 @@ class R_Actor(nn.Module):
         if available_actions is not None:
             available_actions = check(available_actions).to(**self.tpdv)
 
-        actor_features = self.base(obs)
+        # Phase 3: Build encoder input as concat(obs, aggregated_messages).
+        if self._supports_message_concat:
+            if messages is None:
+                messages = torch.zeros(obs.shape[0], self.message_dim, device=obs.device, dtype=obs.dtype)
+            else:
+                messages = check(messages).to(**self.tpdv)
+                messages = torch.nan_to_num(messages, nan=0.0, posinf=1.0, neginf=-1.0)
+
+            actor_input = torch.cat([obs, messages], dim=-1)
+            actor_features = self.base(actor_input)
+        else:
+            # Fallback path for non-MLP encoders.
+            actor_features = self.base(obs)
+
+        actor_features = torch.nan_to_num(actor_features, nan=0.0, posinf=1.0, neginf=-1.0)
+        output_messages = torch.tanh(actor_features)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)
 
         actions, action_log_probs = self.act(actor_features, available_actions, deterministic)
 
-        return actions, action_log_probs, rnn_states
+        # Phase 2 communication: expose per-agent message embedding for runner-side sharing/logging.
+        return actions, action_log_probs, rnn_states, output_messages
 
-    def evaluate_actions(self, obs, rnn_states, action, masks, available_actions=None, active_masks=None):
+    def evaluate_actions(self, obs, rnn_states, action, masks, available_actions=None, active_masks=None, messages=None):
         """
         Compute log probability and entropy of given actions.
         :param obs: (torch.Tensor) observation inputs into network.
@@ -80,6 +109,8 @@ class R_Actor(nn.Module):
         :param available_actions: (torch.Tensor) denotes which actions are available to agent
                                                               (if None, all actions available)
         :param active_masks: (torch.Tensor) denotes whether an agent is active or dead.
+        :param messages: (torch.Tensor) messages from other agents with shape [batch_size, n_agents, message_dim].
+                           If provided, will be aggregated and used to modulate actor features.
 
         :return action_log_probs: (torch.Tensor) log probabilities of the input actions.
         :return dist_entropy: (torch.Tensor) action distribution entropy for the given inputs.
@@ -94,7 +125,21 @@ class R_Actor(nn.Module):
         if active_masks is not None:
             active_masks = check(active_masks).to(**self.tpdv)
 
-        actor_features = self.base(obs)
+        # Phase 3: Build encoder input as concat(obs, aggregated_messages).
+        if self._supports_message_concat:
+            if messages is None:
+                messages = torch.zeros(obs.shape[0], self.message_dim, device=obs.device, dtype=obs.dtype)
+            else:
+                messages = check(messages).to(**self.tpdv)
+                messages = torch.nan_to_num(messages, nan=0.0, posinf=1.0, neginf=-1.0)
+
+            actor_input = torch.cat([obs, messages], dim=-1)
+            actor_features = self.base(actor_input)
+        else:
+            # Fallback path for non-MLP encoders.
+            actor_features = self.base(obs)
+
+        actor_features = torch.nan_to_num(actor_features, nan=0.0, posinf=1.0, neginf=-1.0)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)

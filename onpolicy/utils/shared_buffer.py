@@ -77,6 +77,8 @@ class SharedReplayBuffer(object):
             (self.episode_length, self.n_rollout_threads, num_agents, act_shape), dtype=np.float32)
         self.action_log_probs = np.zeros(
             (self.episode_length, self.n_rollout_threads, num_agents, act_shape), dtype=np.float32)
+        self.shared_messages = np.zeros(
+            (self.episode_length, self.n_rollout_threads, num_agents, num_agents, self.hidden_size), dtype=np.float32)
         self.rewards = np.zeros(
             (self.episode_length, self.n_rollout_threads, num_agents, 1), dtype=np.float32)
 
@@ -105,7 +107,7 @@ class SharedReplayBuffer(object):
     def insert(self, share_obs, obs, states_actor, states_critic,
                actions, action_log_probs, value_preds, rewards, masks,
                bad_masks=None, active_masks=None, available_actions=None,
-               _rr_obs=None, _rr_share_obs=None, _rr_masks=None, reconstructions=None):
+               _rr_obs=None, _rr_share_obs=None, _rr_masks=None, reconstructions=None, shared_messages=None):
         """
         Insert data into the buffer.
         :param share_obs: (argparse.Namespace) arguments containing relevant model, policy, and env information.
@@ -133,6 +135,8 @@ class SharedReplayBuffer(object):
             self.rnn_states_critic[self.step + 1] = states_critic.copy()
         self.actions[self.step] = actions.copy()
         self.action_log_probs[self.step] = action_log_probs.copy()
+        if shared_messages is not None:
+            self.shared_messages[self.step] = shared_messages.copy()
         # try:
         #     self.value_preds[self.step] = value_preds[:,0,:].copy()
         # except:
@@ -314,6 +318,7 @@ class SharedReplayBuffer(object):
         masks = self.masks[:-1].reshape(-1, 1)
         active_masks = self.active_masks[:-1].reshape(-1, 1)
         action_log_probs = self.action_log_probs.reshape(-1, self.action_log_probs.shape[-1])
+        shared_messages = self.shared_messages.reshape(-1, *self.shared_messages.shape[3:])
         advantages = advantages.reshape(-1, 1)
 
         for indices in sampler:
@@ -332,6 +337,7 @@ class SharedReplayBuffer(object):
             masks_batch = masks[indices]
             active_masks_batch = active_masks[indices]
             old_action_log_probs_batch = action_log_probs[indices]
+            messages_batch = shared_messages[indices]
             if advantages is None:
                 adv_targ = None
             else:
@@ -339,7 +345,7 @@ class SharedReplayBuffer(object):
 
             yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch,\
                   value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch,\
-                  adv_targ, available_actions_batch
+                  adv_targ, available_actions_batch, messages_batch
 
     def naive_recurrent_generator(self, advantages, num_mini_batch):
         """
@@ -368,6 +374,7 @@ class SharedReplayBuffer(object):
         masks = self.masks.reshape(-1, batch_size, 1)
         active_masks = self.active_masks.reshape(-1, batch_size, 1)
         action_log_probs = self.action_log_probs.reshape(-1, batch_size, self.action_log_probs.shape[-1])
+        shared_messages = self.shared_messages.reshape(-1, batch_size, *self.shared_messages.shape[3:])
         advantages = advantages.reshape(-1, batch_size, 1)
 
         for start_ind in range(0, batch_size, num_envs_per_batch):
@@ -382,6 +389,7 @@ class SharedReplayBuffer(object):
             masks_batch = []
             active_masks_batch = []
             old_action_log_probs_batch = []
+            messages_batch = []
             adv_targ = []
 
             for offset in range(num_envs_per_batch):
@@ -398,6 +406,7 @@ class SharedReplayBuffer(object):
                 masks_batch.append(masks[:-1, ind])
                 active_masks_batch.append(active_masks[:-1, ind])
                 old_action_log_probs_batch.append(action_log_probs[:, ind])
+                messages_batch.append(shared_messages[:, ind])
                 adv_targ.append(advantages[:, ind])
 
             # [N[T, dim]]
@@ -413,6 +422,7 @@ class SharedReplayBuffer(object):
             masks_batch = np.stack(masks_batch, 1)
             active_masks_batch = np.stack(active_masks_batch, 1)
             old_action_log_probs_batch = np.stack(old_action_log_probs_batch, 1)
+            messages_batch = np.stack(messages_batch, 1)
             adv_targ = np.stack(adv_targ, 1)
 
             # States is just a (N, dim) from_numpy [N[1,dim]]
@@ -432,11 +442,12 @@ class SharedReplayBuffer(object):
             masks_batch = _flatten(T, N, masks_batch)
             active_masks_batch = _flatten(T, N, active_masks_batch)
             old_action_log_probs_batch = _flatten(T, N, old_action_log_probs_batch)
+            messages_batch = _flatten(T, N, messages_batch)
             adv_targ = _flatten(T, N, adv_targ)
 
             yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch,\
                   value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch,\
-                  adv_targ, available_actions_batch
+                adv_targ, available_actions_batch, messages_batch
 
     def recurrent_generator(self, advantages, num_mini_batch, data_chunk_length):
         """
@@ -463,6 +474,7 @@ class SharedReplayBuffer(object):
 
         actions = _cast(self.actions)
         action_log_probs = _cast(self.action_log_probs)
+        shared_messages = self.shared_messages.transpose(1, 2, 0, 3, 4).reshape(-1, *self.shared_messages.shape[3:])
         advantages = _cast(advantages)
         value_preds = _cast(self.value_preds[:-1])
         returns = _cast(self.returns[:-1])
@@ -521,6 +533,7 @@ class SharedReplayBuffer(object):
             masks_batch = []
             active_masks_batch = []
             old_action_log_probs_batch = []
+            messages_batch = []
             adv_targ = []
 
             rr_obs_batch = []
@@ -540,6 +553,7 @@ class SharedReplayBuffer(object):
                 masks_batch.append(masks[ind:ind + data_chunk_length])
                 active_masks_batch.append(active_masks[ind:ind + data_chunk_length])
                 old_action_log_probs_batch.append(action_log_probs[ind:ind + data_chunk_length])
+                messages_batch.append(shared_messages[ind:ind + data_chunk_length])
                 adv_targ.append(advantages[ind:ind + data_chunk_length])
                 # size [T+1 N M Dim]-->[T N M Dim]-->[N M T Dim]-->[N*M*T,Dim]-->[1,Dim]
                 rnn_states_batch.append(rnn_states[ind])
@@ -566,6 +580,7 @@ class SharedReplayBuffer(object):
             masks_batch = np.stack(masks_batch, axis=1)
             active_masks_batch = np.stack(active_masks_batch, axis=1)
             old_action_log_probs_batch = np.stack(old_action_log_probs_batch, axis=1)
+            messages_batch = np.stack(messages_batch, axis=1)
             adv_targ = np.stack(adv_targ, axis=1)
 
             # States is just a (N, -1) from_numpy
@@ -587,11 +602,12 @@ class SharedReplayBuffer(object):
             masks_batch = _flatten(L, N, masks_batch)
             active_masks_batch = _flatten(L, N, active_masks_batch)
             old_action_log_probs_batch = _flatten(L, N, old_action_log_probs_batch)
+            messages_batch = _flatten(L, N, messages_batch)
             adv_targ = _flatten(L, N, adv_targ)
 
             yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch,\
                   value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch,\
-                  adv_targ, available_actions_batch, rr_obs_batch, fr_obs_batch
+                adv_targ, available_actions_batch, messages_batch, rr_obs_batch, fr_obs_batch
 
     def transformer_generator(self, advantages, num_mini_batch=None, mini_batch_size=None):
         """
@@ -657,6 +673,7 @@ class SharedReplayBuffer(object):
         masks = self.masks[:-1].reshape(-1, 1)
         active_masks = self.active_masks[:-1].reshape(-1, 1)
         action_log_probs = self.action_log_probs.reshape(-1, self.action_log_probs.shape[-1])
+        shared_messages = self.shared_messages.reshape(-1, *self.shared_messages.shape[3:])
         advantages = advantages.reshape(-1, 1)
 
         for indices in sampler:
@@ -675,6 +692,7 @@ class SharedReplayBuffer(object):
             masks_batch = masks[indices]
             active_masks_batch = active_masks[indices]
             old_action_log_probs_batch = action_log_probs[indices]
+            messages_batch = shared_messages[indices]
             if advantages is None:
                 adv_targ = None
             else:
@@ -692,4 +710,4 @@ class SharedReplayBuffer(object):
 
             yield share_obs_batch, obs_batch, seq_states_batch, seq_states_critic_batch, actions_batch,\
                   value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch,\
-                  adv_targ, available_actions_batch, rr, fr
+                adv_targ, available_actions_batch, messages_batch, rr, fr
