@@ -114,7 +114,7 @@ class R_MAPPO_COMM():
         """
         share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, \
         value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, \
-        adv_targ, available_actions_batch, r_obs, f_obs = sample
+        adv_targ, available_actions_batch, aggregated_messages_batch, r_obs, f_obs = sample
         # print('r_mappo_comm.py', obs_batch.shape)
 
         old_action_log_probs_batch = check(old_action_log_probs_batch).to(**self.tpdv)
@@ -132,7 +132,7 @@ class R_MAPPO_COMM():
                                                                               masks_batch,
                                                                               available_actions_batch,
                                                                               active_masks_batch,
-                                                                              r_obs=r_obs, f_obs=f_obs)
+                                                                              r_obs=r_obs, f_obs=f_obs, messages=aggregated_messages_batch)
         # actor update
         imp_weights = torch.exp(action_log_probs - old_action_log_probs_batch)
 

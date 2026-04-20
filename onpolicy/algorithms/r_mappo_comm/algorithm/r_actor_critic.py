@@ -202,7 +202,7 @@ class MAC_R_Actor(nn.Module):
 
         self.to(device)
 
-    def forward(self, obs, rnn_states, masks, available_actions=None, deterministic=False):
+    def forward(self, obs, rnn_states, masks, available_actions=None, deterministic=False, messages=None):
         """
         Compute actions from the given inputs.
         :param obs: (np.ndarray / torch.Tensor) observation inputs into network.
@@ -211,6 +211,7 @@ class MAC_R_Actor(nn.Module):
         :param available_actions: (np.ndarray / torch.Tensor) denotes which actions are available to agent
                                                               (if None, all actions available)
         :param deterministic: (bool) whether to sample from action distribution or return the mode.
+        :param messages: (torch.Tensor) aggregated messages from other agents [batch_size, message_dim].
 
         :return actions: (torch.Tensor) actions to take.
         :return action_log_probs: (torch.Tensor) log probabilities of taken actions.
@@ -277,6 +278,11 @@ class MAC_R_Actor(nn.Module):
 
             actor_features = self.base(obs)
 
+            # Phase 3: If aggregated messages provided, concatenate with actor features
+            if messages is not None:
+                messages = check(messages).to(**self.tpdv)
+                actor_features = torch.cat((actor_features, messages), dim=-1)
+
             # communicate
             comm_encoding = self.communicate(actor_features)
             actor_features = torch.cat((comm_encoding, actor_features), -1)
@@ -287,7 +293,7 @@ class MAC_R_Actor(nn.Module):
 
             return actions, action_log_probs, rnn_states
 
-    def evaluate_actions(self, obs, rnn_states, action, masks, available_actions=None, active_masks=None):
+    def evaluate_actions(self, obs, rnn_states, action, masks, available_actions=None, active_masks=None, messages=None):
         """
         Compute log probability and entropy of given actions.
         :param obs: (torch.Tensor) observation inputs into network.
@@ -297,6 +303,7 @@ class MAC_R_Actor(nn.Module):
         :param available_actions: (torch.Tensor) denotes which actions are available to agent
                                                               (if None, all actions available)
         :param active_masks: (torch.Tensor) denotes whether an agent is active or dead.
+        :param messages: (torch.Tensor) aggregated messages from other agents [batch_size, message_dim].
 
         :return action_log_probs: (torch.Tensor) log probabilities of the input actions.
         :return dist_entropy: (torch.Tensor) action distribution entropy for the given inputs.
@@ -373,6 +380,11 @@ class MAC_R_Actor(nn.Module):
                 active_masks = check(active_masks).to(**self.tpdv)
 
             actor_features = self.base(obs)
+
+            # Phase 3: If aggregated messages provided, concatenate with actor features
+            if messages is not None:
+                messages = check(messages).to(**self.tpdv)
+                actor_features = torch.cat((actor_features, messages), dim=-1)
 
             # communicate
             comm_encoding = self.communicate(actor_features)

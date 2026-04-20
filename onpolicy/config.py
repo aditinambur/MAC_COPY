@@ -231,6 +231,14 @@ def get_config():
     parser.add_argument("--comm_rounds", type=int, default=1, help="The number of communication rounds.")
     parser.add_argument("--no_comm", action='store_true',
         default=False, help='do not communicate')
+    parser.add_argument("--disable_messages", action='store_true',
+        default=False, help='disable aggregated messages during training for causal analysis')
+    
+    # evaluation-only interventions for causal analysis
+    parser.add_argument("--eval_disable_messages", action='store_true',
+        default=False, help='disable aggregated messages during evaluation for causal analysis')
+    parser.add_argument("--eval_noise_std", type=float, default=0.0,
+        help='add Gaussian noise to messages during evaluation (std dev). If 0.0, no noise applied.')
 
     # contrastive parameters
     parser.add_argument("--contrastive", action='store_true', default=False, help='use a contrastive')

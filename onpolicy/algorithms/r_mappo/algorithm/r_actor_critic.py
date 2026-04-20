@@ -36,6 +36,7 @@ class R_Actor(nn.Module):
         self._supports_message_concat = (base is MLPBase and len(obs_shape) == 1)
         self.message_dim = self.hidden_size
         self.obs_dim = int(obs_shape[0]) if len(obs_shape) == 1 else None
+        self.message_head = nn.Linear(self.obs_dim, self.message_dim) if self.obs_dim is not None else None
 
         if self._supports_message_concat:
             # Build encoder for [obs, message] concatenated input.
@@ -89,7 +90,11 @@ class R_Actor(nn.Module):
             actor_features = self.base(obs)
 
         actor_features = torch.nan_to_num(actor_features, nan=0.0, posinf=1.0, neginf=-1.0)
-        output_messages = torch.tanh(actor_features)
+        if self.message_head is not None:
+            # Emit messages from local observations only: message = f(obs).
+            output_messages = torch.tanh(self.message_head(obs))
+        else:
+            output_messages = torch.tanh(actor_features)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)

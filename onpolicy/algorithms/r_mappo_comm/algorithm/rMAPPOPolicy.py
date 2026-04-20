@@ -47,7 +47,7 @@ class R_MAPPOPolicy:
         update_linear_schedule(self.critic_optimizer, episode, episodes, self.critic_lr)
 
     def get_actions(self, cent_obs, obs, rnn_states_actor, rnn_states_critic, masks, available_actions=None,
-                    deterministic=False):
+                    deterministic=False, messages=None):
         """
         Compute actions and value function predictions for the given inputs.
         :param cent_obs (np.ndarray): centralized input to the critic.
@@ -58,6 +58,7 @@ class R_MAPPOPolicy:
         :param available_actions: (np.ndarray) denotes which actions are available to agent
                                   (if None, all actions available)
         :param deterministic: (bool) whether the action should be mode of distribution or should be sampled.
+        :param messages: (np.ndarray) aggregated messages from other agents [batch_size, message_dim].
 
         :return values: (torch.Tensor) value function predictions.
         :return actions: (torch.Tensor) actions to take.
@@ -69,7 +70,8 @@ class R_MAPPOPolicy:
                                                                  rnn_states_actor,
                                                                  masks,
                                                                  available_actions,
-                                                                 deterministic)
+                                                                 deterministic,
+                                                                 messages=messages)
 
         values, rnn_states_critic, _, _ = self.actor.critic(cent_obs, rnn_states_critic, masks)
         return values, actions, action_log_probs, rnn_states_actor, rnn_states_critic
@@ -87,7 +89,7 @@ class R_MAPPOPolicy:
         return values
 
     def evaluate_actions(self, cent_obs, obs, rnn_states_actor, rnn_states_critic, action, masks,
-                         available_actions=None, active_masks=None, r_obs=None, f_obs=None):
+                         available_actions=None, active_masks=None, r_obs=None, f_obs=None, messages=None):
         """
         Get action logprobs / entropy and value function predictions for actor update.
         :param cent_obs (np.ndarray): centralized input to the critic.
@@ -99,6 +101,7 @@ class R_MAPPOPolicy:
         :param available_actions: (np.ndarray) denotes which actions are available to agent
                                   (if None, all actions available)
         :param active_masks: (torch.Tensor) denotes whether an agent is active or dead.
+        :param messages: (torch.Tensor) aggregated messages from other agents [batch_size, message_dim].
 
         :return values: (torch.Tensor) value function predictions.
         :return action_log_probs: (torch.Tensor) log probabilities of the input actions.
@@ -109,7 +112,8 @@ class R_MAPPOPolicy:
                                                                      action,
                                                                      masks,
                                                                      available_actions,
-                                                                     active_masks)
+                                                                     active_masks,
+                                                                     messages=messages)
 
         values, _, contrast_rand_loss, contrast_future_loss = self.actor.critic(cent_obs, rnn_states_critic, masks, r_obs=r_obs, f_obs=f_obs)
         return values, action_log_probs, dist_entropy, ae_loss, contrast_rand_loss, contrast_future_loss

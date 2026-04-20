@@ -4,6 +4,9 @@ from onpolicy.envs.mpe.scenario import BaseScenario
 
 
 class Scenario(BaseScenario):
+    # Toggle to disable/enable communication in observations
+    USE_COMMUNICATION = False
+    
     def make_world(self, args):
         world = World()
         world.world_length = args.episode_length
@@ -12,6 +15,7 @@ class Scenario(BaseScenario):
         world.num_agents = args.num_agents
         world.num_landmarks = args.num_landmarks  # 3
         world.collaborative = True
+        world.use_communication = True  # Set to False to disable communication in observations
         # add agents
         world.agents = [Agent() for i in range(world.num_agents)]
         for i, agent in enumerate(world.agents):
@@ -84,20 +88,35 @@ class Scenario(BaseScenario):
         return rew
 
     def observation(self, agent, world):
-        # get positions of all entities in this agent's reference frame
+        K = 1  # number of visible landmarks per agent
+
+        # Compute distances to all landmarks
+        distances = [np.linalg.norm(entity.state.p_pos - agent.state.p_pos) for entity in world.landmarks]
+        
+        # Pair distances with landmarks and sort by distance
+        sorted_landmarks = sorted(zip(distances, world.landmarks), key=lambda x: x[0])
+        
+        # Select the K nearest landmarks
+        visible_landmarks = sorted_landmarks[:K]
+
+        # Build observation for landmarks
         entity_pos = []
-        for entity in world.landmarks:  # world.entities:
-            entity_pos.append(entity.state.p_pos - agent.state.p_pos)
-        # entity colors
-        entity_color = []
-        for entity in world.landmarks:  # world.entities:
-            entity_color.append(entity.color)
-        # communication of all other agents
+        for i, entity in enumerate(world.landmarks):
+            if any(entity is visible[1] for visible in visible_landmarks):
+                entity_pos.append(entity.state.p_pos - agent.state.p_pos)
+            else:
+                entity_pos.append(np.zeros_like(agent.state.p_pos))
+
+        # Communication of all other agents (conditional on use_communication flag)
         comm = []
         other_pos = []
         for other in world.agents:
             if other is agent:
                 continue
-            comm.append(other.state.c)
+            if world.use_communication:
+                comm.append(other.state.c)
+            else:
+                comm.append(np.zeros_like(other.state.c))
             other_pos.append(other.state.p_pos - agent.state.p_pos)
+
         return np.concatenate([agent.state.p_vel] + [agent.state.p_pos] + entity_pos + other_pos + comm)

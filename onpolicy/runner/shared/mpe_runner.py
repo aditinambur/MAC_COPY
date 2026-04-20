@@ -19,8 +19,7 @@ class MPERunner(Runner):
         
         # Phase 3: Initialize message buffers
         self.latest_messages = None
-        self.latest_shared_messages = None
-        self.action_input_shared_messages = None
+        self.latest_aggregated_messages = None
 
     def run(self):
         self.warmup()   
@@ -91,15 +90,15 @@ class MPERunner(Runner):
     def _log_messages(self, episode, step):
         """Persist communication tensors for debugging under scripts/results/.../messages."""
         messages = getattr(self, "latest_messages", None)
-        shared_messages = getattr(self, "latest_shared_messages", None)
+        aggregated_messages = getattr(self, "latest_aggregated_messages", None)
 
         if messages is None:
             return
 
         base = "episode_{:06d}_step_{:04d}".format(episode, step)
         np.save(os.path.join(self.message_log_dir, base + "_messages.npy"), messages)
-        if shared_messages is not None:
-            np.save(os.path.join(self.message_log_dir, base + "_shared_messages.npy"), shared_messages)
+        if aggregated_messages is not None:
+            np.save(os.path.join(self.message_log_dir, base + "_aggregated_messages.npy"), aggregated_messages)
 
     def warmup(self):
         # reset env
@@ -108,7 +107,7 @@ class MPERunner(Runner):
         # Phase 3: Initialize zero messages for the first step
         # so agents can start using communication from step 0
         message_dim = self.all_args.hidden_size  # Message embeddings have same dim as hidden layer
-        self.latest_shared_messages = np.zeros((self.n_rollout_threads, self.num_agents, self.num_agents, message_dim), 
+        self.latest_aggregated_messages = np.zeros((self.n_rollout_threads, self.num_agents, message_dim), 
                                                dtype=np.float32)
 
         # replay buffer
@@ -125,18 +124,14 @@ class MPERunner(Runner):
     def collect(self, step):
         self.trainer.prep_rollout()
         
-        # Phase 3: Reshape messages for actor input if available
+        # Phase 3: Reshape aggregated messages for actor input if available
         messages_input = None
-        action_input_shared_messages = None
-        if hasattr(self, 'latest_shared_messages') and self.latest_shared_messages is not None:
-            # Keep the exact shared tensor used to pick this step's actions for PPO replay consistency.
-            action_input_shared_messages = self.latest_shared_messages.copy()
-            # latest_shared_messages shape: [n_envs, n_agents, n_agents, message_dim]
-            # Reshape for batched policy call: [n_envs*n_agents, n_agents, message_dim]
-            n_envs = self.latest_shared_messages.shape[0]
-            n_agents = self.latest_shared_messages.shape[1]
-            message_dim = self.latest_shared_messages.shape[3]
-            messages_input = self.latest_shared_messages.reshape(n_envs * n_agents, n_agents, message_dim)
+        if hasattr(self, 'latest_aggregated_messages') and self.latest_aggregated_messages is not None:
+            # latest_aggregated_messages shape: [n_envs, n_agents, message_dim]
+            # Reshape for batched policy call: [n_envs*n_agents, message_dim]
+            n_envs, n_agents, message_dim = self.latest_aggregated_messages.shape
+            messages_input = self.latest_aggregated_messages.reshape(n_envs * n_agents, message_dim)
+        
         
         policy_out = self.trainer.policy.get_actions(np.concatenate(self.buffer.share_obs[step]),
                             np.concatenate(self.buffer.obs[step]),
@@ -146,7 +141,7 @@ class MPERunner(Runner):
                             messages=messages_input)
 
         messages = None
-        shared_messages = None
+        aggregated_messages = None
         reconstructions = None
 
         if len(policy_out) == 6:
@@ -160,19 +155,30 @@ class MPERunner(Runner):
             else:
                 # [n_envs * n_agents, message_dim] -> [n_envs, n_agents, message_dim]
                 messages = np.array(np.split(aux_np, self.n_rollout_threads))
-                # [n_envs, n_agents, message_dim] -> [n_envs, n_agents, n_agents, message_dim]
-                # shared_messages[e][i] contains all agent messages within env e.
-                shared_messages = np.repeat(messages[:, None, :, :], self.num_agents, axis=1)
+                # PHASE 3: Compute aggregated messages per agent
+                # messages shape: [n_envs, n_agents, message_dim]
+                # aggregated_messages[e][i] = mean of messages from agents j!=i in env e
+                n_envs, n_agents, msg_dim = messages.shape
+                aggregated_messages = np.zeros((n_envs, n_agents, msg_dim), dtype=np.float32)
+                for agent_i in range(n_agents):
+                    # Sum messages from all agents except agent_i
+                    mask = np.ones(n_agents, dtype=bool)
+                    mask[agent_i] = False
+                    aggregated_messages[:, agent_i, :] = messages[:, mask, :].mean(axis=1)
         elif len(policy_out) == 5:
             value, action, action_log_prob, rnn_states, rnn_states_critic = policy_out
         else:
             
             raise ValueError("Unexpected get_actions() output length: {}".format(len(policy_out)))
 
-        # Optional debug visibility for message passing (not used by PPO update yet).
+        # CAUSAL EXPERIMENT: Disable messages if flag is set
+        if self.all_args.disable_messages and aggregated_messages is not None:
+            aggregated_messages = np.zeros_like(aggregated_messages)
+        
+        # Optional debug visibility for message passing.
         self.latest_messages = messages
-        self.latest_shared_messages = shared_messages
-        self.action_input_shared_messages = action_input_shared_messages
+        self.latest_aggregated_messages = aggregated_messages
+        self.action_input_aggregated_messages = aggregated_messages  # Store aggregated for replay consistency
 
         # [self.envs, agents, dim]
         values = np.array(np.split(_t2n(value), self.n_rollout_threads))
@@ -210,35 +216,96 @@ class MPERunner(Runner):
             share_obs = obs
 
         self.buffer.insert(share_obs, obs, rnn_states, rnn_states_critic, actions, action_log_probs, values, rewards, masks,
-                   reconstructions=reconstructions, shared_messages=self.action_input_shared_messages)
+                   reconstructions=reconstructions, aggregated_messages=getattr(self, 'action_input_aggregated_messages', None))
 
     @torch.no_grad()
-    def eval(self, total_num_steps):
+    def _eval_with_intervention(self, intervention_type='normal'):
+        """
+        Run evaluation with specified message intervention.
+        
+        :param intervention_type: 'normal' (no intervention), 'no_messages' (disable), or 'noisy' (add noise)
+        :return: eval_episode_rewards array
+        """
         eval_episode_rewards = []
         eval_obs = self.eval_envs.reset()
 
         eval_rnn_states = np.zeros((self.n_eval_rollout_threads, *self.buffer.rnn_states.shape[2:]), dtype=np.float32)
         eval_masks = np.ones((self.n_eval_rollout_threads, self.num_agents, 1), dtype=np.float32)
+        
+        # Initialize messages (zero for first step, like warmup)
+        message_dim = self.all_args.hidden_size
+        eval_aggregated_messages = np.zeros((self.n_eval_rollout_threads * self.num_agents, message_dim), dtype=np.float32)
 
         for eval_step in range(self.episode_length):
             self.trainer.prep_rollout()
-            eval_out = self.trainer.policy.act(np.concatenate(eval_obs),
-                                               np.concatenate(eval_rnn_states),
-                                               np.concatenate(eval_masks),
-                                               deterministic=True)
-
-            if len(eval_out) == 3:
-                eval_action, eval_rnn_states, reconstruction = eval_out
-                eval_reconstructions = np.array(np.split(_t2n(reconstruction), self.n_eval_rollout_threads))
-            elif len(eval_out) == 2:
-                eval_action, eval_rnn_states = eval_out
-                eval_reconstructions = None
-            else:
-                raise ValueError("Unexpected act() output length: {}".format(len(eval_out)))
-
-            eval_actions = np.array(np.split(_t2n(eval_action), self.n_eval_rollout_threads))
-            eval_rnn_states = np.array(np.split(_t2n(eval_rnn_states), self.n_eval_rollout_threads))
             
+            # CAUSAL INTERVENTION: Apply intervention to messages BEFORE passing to policy
+            messages_for_policy = eval_aggregated_messages.copy()
+            
+            if intervention_type == 'no_messages':
+                # CASE 1: Disable messages
+                messages_for_policy = np.zeros_like(messages_for_policy)
+            elif intervention_type == 'noisy':
+                # CASE 2: Add noise to messages
+                if self.all_args.eval_noise_std > 0:
+                    noise = np.random.normal(0, self.all_args.eval_noise_std, size=messages_for_policy.shape)
+                    messages_for_policy = messages_for_policy + noise
+            # else: intervention_type == 'normal' -> use messages as-is
+            
+            # Call policy with modified messages (using get_actions to get message outputs)
+            try:
+                policy_out = self.trainer.policy.get_actions(
+                    np.concatenate(eval_obs),
+                    np.concatenate(eval_obs),  # obs also used as cent_obs for evaluation
+                    np.concatenate(eval_rnn_states),
+                    np.concatenate(eval_rnn_states),  # reuse rnn_states for both actor and critic
+                    np.concatenate(eval_masks),
+                    deterministic=True,
+                    messages=messages_for_policy
+                )
+                
+                # Extract outputs from get_actions
+                if len(policy_out) == 5:
+                    # Standard output: value, action, action_log_prob, rnn_states_actor, rnn_states_critic
+                    value, eval_action, action_log_prob, eval_rnn_states_new, eval_rnn_states_critic = policy_out
+                    eval_messages = None
+                    eval_reconstructions = None
+                elif len(policy_out) == 6:
+                    # With messages: value, action, action_log_prob, rnn_states_actor, rnn_states_critic, messages
+                    value, eval_action, action_log_prob, eval_rnn_states_new, eval_rnn_states_critic, eval_messages_out = policy_out
+                    eval_messages = _t2n(eval_messages_out)
+                    eval_reconstructions = None
+                else:
+                    raise ValueError("Unexpected get_actions() output length: {}".format(len(policy_out)))
+                
+                eval_rnn_states = np.array(np.split(_t2n(eval_rnn_states_new), self.n_eval_rollout_threads))
+                eval_action = _t2n(eval_action)
+                
+            except Exception:
+                # Fallback to act() if get_actions not available (backward compatibility)
+                eval_out = self.trainer.policy.act(
+                    np.concatenate(eval_obs),
+                    np.concatenate(eval_rnn_states),
+                    np.concatenate(eval_masks),
+                    deterministic=True
+                )
+                
+                if len(eval_out) == 3:
+                    eval_action, eval_rnn_states, reconstruction = eval_out
+                    eval_reconstructions = np.array(np.split(_t2n(reconstruction), self.n_eval_rollout_threads))
+                elif len(eval_out) == 2:
+                    eval_action, eval_rnn_states = eval_out
+                    eval_reconstructions = None
+                else:
+                    raise ValueError("Unexpected act() output length: {}".format(len(eval_out)))
+                
+                eval_action = _t2n(eval_action)
+                eval_rnn_states = np.array(np.split(_t2n(eval_rnn_states), self.n_eval_rollout_threads))
+                eval_messages = None
+
+            eval_actions = np.array(np.split(eval_action, self.n_eval_rollout_threads))
+            
+            # Convert actions to environment format
             if self.eval_envs.action_space[0].__class__.__name__ == 'MultiDiscrete':
                 for i in range(self.eval_envs.action_space[0].shape):
                     eval_uc_actions_env = np.eye(self.eval_envs.action_space[0].high[i]+1)[eval_actions[:, :, i]]
@@ -251,18 +318,71 @@ class MPERunner(Runner):
             else:
                 raise NotImplementedError
 
-            # Obser reward and next obs
-            eval_obs, eval_rewards, eval_dones, eval_infos = self.eval_envs.step(eval_actions_env, eval_reconstructions)
+            # Step environment
+            eval_obs, eval_rewards, eval_dones, eval_infos = self.eval_envs.step(
+                eval_actions_env, 
+                eval_reconstructions if eval_reconstructions is not None else None
+            )
             eval_episode_rewards.append(eval_rewards)
 
+            # Reset states for done environments
             eval_rnn_states[eval_dones == True] = np.zeros(((eval_dones == True).sum(), self.recurrent_N, self.hidden_size), dtype=np.float32)
             eval_masks = np.ones((self.n_eval_rollout_threads, self.num_agents, 1), dtype=np.float32)
             eval_masks[eval_dones == True] = np.zeros(((eval_dones == True).sum(), 1), dtype=np.float32)
+            
+            # Compute aggregated messages for next step
+            if eval_messages is not None:
+                # eval_messages shape: [n_envs*n_agents, message_dim]
+                # Reshape to [n_envs, n_agents, message_dim], aggregate, reshape back
+                n_envs = self.n_eval_rollout_threads
+                n_agents = self.num_agents
+                msg_dim = eval_messages.shape[-1]
+                
+                messages_reshaped = eval_messages.reshape(n_envs, n_agents, msg_dim)
+                eval_aggregated_messages_per_agent = np.zeros_like(messages_reshaped)
+                
+                for agent_i in range(n_agents):
+                    mask = np.ones(n_agents, dtype=bool)
+                    mask[agent_i] = False
+                    eval_aggregated_messages_per_agent[:, agent_i, :] = messages_reshaped[:, mask, :].mean(axis=1)
+                
+                eval_aggregated_messages = eval_aggregated_messages_per_agent.reshape(n_envs * n_agents, msg_dim)
+            else:
+                # No messages available, reset to zeros
+                eval_aggregated_messages = np.zeros((self.n_eval_rollout_threads * self.num_agents, message_dim), dtype=np.float32)
 
-        eval_episode_rewards = np.array(eval_episode_rewards)
+        return np.array(eval_episode_rewards)
+
+    @torch.no_grad()
+    def eval(self, total_num_steps):
+        """Run evaluation with optional causal interventions on messages."""
         eval_env_infos = {}
-        eval_env_infos['eval_average_episode_rewards'] = np.sum(np.array(eval_episode_rewards), axis=0)
-        print("eval average episode rewards of agent: " + str(eval_env_infos['eval_average_episode_rewards']))
+        
+        # Run normal evaluation
+        print("\n[EVAL] Running evaluation with NORMAL messages...")
+        eval_episode_rewards_normal = self._eval_with_intervention(intervention_type='normal')
+        eval_episode_rewards_normal = np.array(eval_episode_rewards_normal)
+        eval_env_infos['eval_normal_rewards'] = np.sum(eval_episode_rewards_normal, axis=0)
+        
+        # Run evaluation with disabled messages if flag set
+        if self.all_args.eval_disable_messages:
+            print("\n[EVAL] Running evaluation with DISABLED messages...")
+            eval_episode_rewards_no_msg = self._eval_with_intervention(intervention_type='no_messages')
+            eval_episode_rewards_no_msg = np.array(eval_episode_rewards_no_msg)
+            eval_env_infos['eval_no_message_rewards'] = np.sum(eval_episode_rewards_no_msg, axis=0)
+        
+        # Run evaluation with noisy messages if noise_std > 0
+        if self.all_args.eval_noise_std > 0:
+            print("\n[EVAL] Running evaluation with NOISY messages (std={})...".format(self.all_args.eval_noise_std))
+            eval_episode_rewards_noisy = self._eval_with_intervention(intervention_type='noisy')
+            eval_episode_rewards_noisy = np.array(eval_episode_rewards_noisy)
+            eval_env_infos['eval_noisy_message_rewards'] = np.sum(eval_episode_rewards_noisy, axis=0)
+        
+        # Print and log results
+        print("\n[EVAL RESULTS]")
+        for key, val in eval_env_infos.items():
+            print("{}: {}".format(key, val))
+        
         self.log_env(eval_env_infos, total_num_steps)
 
     @torch.no_grad()
