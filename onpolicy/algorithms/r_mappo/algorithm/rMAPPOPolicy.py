@@ -28,9 +28,18 @@ class R_MAPPOPolicy:
         self.actor = R_Actor(args, self.obs_space, self.act_space, self.device)
         self.critic = R_Critic(args, self.share_obs_space, self.device)
 
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(),
-                                                lr=self.lr, eps=self.opti_eps,
-                                                weight_decay=self.weight_decay)
+        # Attention-based message aggregation: each agent learns which senders to
+        # weight more heavily, instead of plain mean pooling.
+        self.num_agents = args.num_agents
+        message_dim = args.hidden_size
+        self.attention_weight = torch.nn.Parameter(
+            torch.randn(self.num_agents, message_dim, device=self.device) * 0.01
+        )
+
+        self.actor_optimizer = torch.optim.Adam(
+            list(self.actor.parameters()) + [self.attention_weight],
+            lr=self.lr, eps=self.opti_eps,
+            weight_decay=self.weight_decay)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(),
                                                  lr=self.critic_lr,
                                                  eps=self.opti_eps,
@@ -78,8 +87,17 @@ class R_MAPPOPolicy:
             if obs_batch_size is not None and bsz == obs_batch_size:
                 if n_agents > 1:
                     recv_idx = torch.arange(bsz, device=messages.device) % n_agents
-                    own_msg = messages[torch.arange(bsz, device=messages.device), recv_idx]
-                    agent_messages = (messages.sum(dim=1) - own_msg) / (n_agents - 1)
+
+                    # Attention-based aggregation: each receiver agent learns which
+                    # senders to trust, instead of plain mean pooling.
+                    attention_weight = self.attention_weight.to(device=messages.device, dtype=messages.dtype)
+                    att_logits = torch.einsum('bij,ji->bi', messages, attention_weight.t())
+
+                    self_mask = torch.eye(n_agents, device=messages.device, dtype=messages.dtype)[recv_idx]
+                    att_logits = att_logits + (self_mask - 1) * 1e9
+
+                    att_weights = torch.softmax(att_logits, dim=1)
+                    agent_messages = torch.einsum('bi,bij->bj', att_weights, messages)
                 else:
                     agent_messages = torch.zeros(bsz, message_dim, device=messages.device, dtype=messages.dtype)
                 return agent_messages
@@ -130,25 +148,47 @@ class R_MAPPOPolicy:
             actions, action_log_probs, rnn_states_actor = actor_out
             output_messages = None
 
-        values, rnn_states_critic = self.critic(cent_obs, rnn_states_critic, masks)
+        values, rnn_states_critic = self.critic(cent_obs, rnn_states_critic, masks, agent_messages)
         if output_messages is not None:
             return values, actions, action_log_probs, rnn_states_actor, rnn_states_critic, output_messages
         return values, actions, action_log_probs, rnn_states_actor, rnn_states_critic
 
-    def get_values(self, cent_obs, rnn_states_critic, masks):
+    def get_values(self, cent_obs, rnn_states_critic, masks, messages=None):
         """
         Get value function predictions.
         :param cent_obs (np.ndarray): centralized input to the critic.
         :param rnn_states_critic: (np.ndarray) if critic is RNN, RNN states for critic.
         :param masks: (np.ndarray) denotes points at which RNN states should be reset.
+        :param messages: (torch.Tensor) messages from other agents with shape [batch_size, n_agents, message_dim].
+                                       If provided, will be used by critic for value prediction.
 
         :return values: (torch.Tensor) value function predictions.
         """
-        values, _ = self.critic(cent_obs, rnn_states_critic, masks)
+        cent_obs_batch_size = cent_obs.shape[0] if hasattr(cent_obs, "shape") else None
+        agent_messages = self._prepare_agent_messages(messages, obs_batch_size=cent_obs_batch_size)
+        values, _ = self.critic(cent_obs, rnn_states_critic, masks, agent_messages)
         return values
 
+    def get_action_distribution(self, obs, rnn_states_actor, masks, available_actions=None, messages=None):
+        """
+        Get the actor's action distribution(s) for the given inputs without sampling.
+        Used for causal-influence analysis (e.g. KL divergence between distributions under
+        different message interventions).
+        :param obs (np.ndarray): local agent inputs to the actor.
+        :param rnn_states_actor: (np.ndarray) if actor is RNN, RNN states for actor.
+        :param masks: (np.ndarray) denotes points at which RNN states should be reset.
+        :param available_actions: (np.ndarray) denotes which actions are available to agent
+                                  (if None, all actions available)
+        :param messages: (np.ndarray / torch.Tensor) messages from other agents.
+
+        :return: a single distribution, or a list of distributions (multi_discrete / mixed action spaces).
+        """
+        obs_batch_size = obs.shape[0] if hasattr(obs, "shape") else None
+        agent_messages = self._prepare_agent_messages(messages, obs_batch_size=obs_batch_size)
+        return self.actor.get_action_distribution(obs, rnn_states_actor, masks, available_actions, agent_messages)
+
     def evaluate_actions(self, cent_obs, obs, rnn_states_actor, rnn_states_critic, action, masks,
-                         available_actions=None, active_masks=None, messages=None):
+                         available_actions=None, active_masks=None, messages=None, prev_share_obs=None):
         """
         Get action logprobs / entropy and value function predictions for actor update.
         :param cent_obs (np.ndarray): centralized input to the critic.
@@ -162,6 +202,8 @@ class R_MAPPOPolicy:
         :param active_masks: (torch.Tensor) denotes whether an agent is active or dead.
         :param messages: (torch.Tensor) messages from other agents with shape [batch_size, n_agents, message_dim].
                                        If provided, will be used by actor for action evaluation (Phase 3 communication).
+        :param prev_share_obs: (torch.Tensor) centralized observation from the previous timestep, used to
+                                       recompute messages through message_head so gradients flow to it.
 
         :return values: (torch.Tensor) value function predictions.
         :return action_log_probs: (torch.Tensor) log probabilities of the input actions.
@@ -176,9 +218,10 @@ class R_MAPPOPolicy:
                                                                      masks,
                                                                      available_actions,
                                                                      active_masks,
-                                         agent_messages)
+                                         agent_messages,
+                                         prev_share_obs)
 
-        values, _ = self.critic(cent_obs, rnn_states_critic, masks)
+        values, _ = self.critic(cent_obs, rnn_states_critic, masks, agent_messages)
         return values, action_log_probs, dist_entropy
 
     def act(self, obs, rnn_states_actor, masks, available_actions=None, deterministic=False):

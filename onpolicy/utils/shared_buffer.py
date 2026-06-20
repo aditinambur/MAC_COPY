@@ -320,6 +320,12 @@ class SharedReplayBuffer(object):
         active_masks = self.active_masks[:-1].reshape(-1, 1)
         action_log_probs = self.action_log_probs.reshape(-1, self.action_log_probs.shape[-1])
         aggregated_messages = self.aggregated_messages.reshape(-1, *self.aggregated_messages.shape[3:])
+        # Previous-timestep centralized observations, used to recompute messages through
+        # message_head during PPO updates so gradients flow into message_head's params.
+        # prev_share_obs[t] = share_obs[t-1], with prev_share_obs[0] = zeros.
+        prev_share_obs = np.concatenate(
+            [np.zeros_like(self.share_obs[0:1]), self.share_obs[:-2]], axis=0
+        ).reshape(-1, *self.share_obs.shape[3:])
         advantages = advantages.reshape(-1, 1)
 
         for indices in sampler:
@@ -339,6 +345,7 @@ class SharedReplayBuffer(object):
             active_masks_batch = active_masks[indices]
             old_action_log_probs_batch = action_log_probs[indices]
             aggregated_messages_batch = aggregated_messages[indices]
+            prev_share_obs_batch = prev_share_obs[indices]
             if advantages is None:
                 adv_targ = None
             else:
@@ -346,7 +353,7 @@ class SharedReplayBuffer(object):
 
             yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch,\
                   value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch,\
-                  adv_targ, available_actions_batch, aggregated_messages_batch
+                  adv_targ, available_actions_batch, aggregated_messages_batch, prev_share_obs_batch
 
     def naive_recurrent_generator(self, advantages, num_mini_batch):
         """

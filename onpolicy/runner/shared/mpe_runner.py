@@ -218,20 +218,45 @@ class MPERunner(Runner):
         self.buffer.insert(share_obs, obs, rnn_states, rnn_states_critic, actions, action_log_probs, values, rewards, masks,
                    reconstructions=reconstructions, aggregated_messages=getattr(self, 'action_input_aggregated_messages', None))
 
+    def _seed_eval_envs(self, seed):
+        """
+        Seed the eval environments so reset() produces a deterministic initial layout.
+        Used for Common Random Numbers (CRN): seeding identically before each intervention makes
+        all conditions start from the SAME layout. MPE's env.seed() seeds the global NumPy RNG and
+        reset() draws the layout from it, so seeding the global RNG is sufficient for in-process
+        (DummyVecEnv) evaluation. (For SubprocVecEnv the seed would not cross the process boundary.)
+        """
+        np.random.seed(seed)
+        seed_fn = getattr(self.eval_envs, "seed", None)
+        if callable(seed_fn):
+            try:
+                seed_fn(seed)
+            except Exception:
+                pass
+
     @torch.no_grad()
-    def _eval_with_intervention(self, intervention_type='normal'):
+    def _eval_with_intervention(self, intervention_type='normal', crn_seed=None):
         """
-        Run evaluation with specified message intervention.
-        
-        :param intervention_type: 'normal' (no intervention), 'no_messages' (disable), or 'noisy' (add noise)
-        :return: eval_episode_rewards array
+        Run a single evaluation episode with a specified message intervention, through the
+        communication-aware actor AND critic pipeline.
+
+        :param intervention_type: 'normal' (no intervention), 'no_messages' (zero the incoming
+                                  aggregated message), or 'noisy' (add Gaussian noise to it).
+        :param crn_seed: (int or None) if given, the eval envs are seeded with it before reset so
+                         every condition starts from the SAME initial layout (Common Random Numbers).
+        :return: (np.ndarray) per-step rewards, shape [episode_length, n_threads, n_agents, 1].
         """
+        # Common Random Numbers: seed before reset so the initial layout is identical across
+        # interventions, making reward differences attributable to the intervention, not the layout.
+        if crn_seed is not None:
+            self._seed_eval_envs(crn_seed)
+
         eval_episode_rewards = []
         eval_obs = self.eval_envs.reset()
 
         eval_rnn_states = np.zeros((self.n_eval_rollout_threads, *self.buffer.rnn_states.shape[2:]), dtype=np.float32)
         eval_masks = np.ones((self.n_eval_rollout_threads, self.num_agents, 1), dtype=np.float32)
-        
+
         # Initialize messages (zero for first step, like warmup)
         message_dim = self.all_args.hidden_size
         eval_aggregated_messages = np.zeros((self.n_eval_rollout_threads * self.num_agents, message_dim), dtype=np.float32)
@@ -239,69 +264,51 @@ class MPERunner(Runner):
         for eval_step in range(self.episode_length):
             self.trainer.prep_rollout()
             
-            # CAUSAL INTERVENTION: Apply intervention to messages BEFORE passing to policy
+            # CAUSAL INTERVENTION: applied to the incoming aggregated message BEFORE the policy.
             messages_for_policy = eval_aggregated_messages.copy()
-            
             if intervention_type == 'no_messages':
-                # CASE 1: Disable messages
                 messages_for_policy = np.zeros_like(messages_for_policy)
             elif intervention_type == 'noisy':
-                # CASE 2: Add noise to messages
                 if self.all_args.eval_noise_std > 0:
                     noise = np.random.normal(0, self.all_args.eval_noise_std, size=messages_for_policy.shape)
                     messages_for_policy = messages_for_policy + noise
-            # else: intervention_type == 'normal' -> use messages as-is
-            
-            # Call policy with modified messages (using get_actions to get message outputs)
-            try:
-                policy_out = self.trainer.policy.get_actions(
-                    np.concatenate(eval_obs),
-                    np.concatenate(eval_obs),  # obs also used as cent_obs for evaluation
-                    np.concatenate(eval_rnn_states),
-                    np.concatenate(eval_rnn_states),  # reuse rnn_states for both actor and critic
-                    np.concatenate(eval_masks),
-                    deterministic=True,
-                    messages=messages_for_policy
-                )
-                
-                # Extract outputs from get_actions
-                if len(policy_out) == 5:
-                    # Standard output: value, action, action_log_prob, rnn_states_actor, rnn_states_critic
-                    value, eval_action, action_log_prob, eval_rnn_states_new, eval_rnn_states_critic = policy_out
-                    eval_messages = None
-                    eval_reconstructions = None
-                elif len(policy_out) == 6:
-                    # With messages: value, action, action_log_prob, rnn_states_actor, rnn_states_critic, messages
-                    value, eval_action, action_log_prob, eval_rnn_states_new, eval_rnn_states_critic, eval_messages_out = policy_out
-                    eval_messages = _t2n(eval_messages_out)
-                    eval_reconstructions = None
-                else:
-                    raise ValueError("Unexpected get_actions() output length: {}".format(len(policy_out)))
-                
-                eval_rnn_states = np.array(np.split(_t2n(eval_rnn_states_new), self.n_eval_rollout_threads))
-                eval_action = _t2n(eval_action)
-                
-            except Exception:
-                # Fallback to act() if get_actions not available (backward compatibility)
-                eval_out = self.trainer.policy.act(
-                    np.concatenate(eval_obs),
-                    np.concatenate(eval_rnn_states),
-                    np.concatenate(eval_masks),
-                    deterministic=True
-                )
-                
-                if len(eval_out) == 3:
-                    eval_action, eval_rnn_states, reconstruction = eval_out
-                    eval_reconstructions = np.array(np.split(_t2n(reconstruction), self.n_eval_rollout_threads))
-                elif len(eval_out) == 2:
-                    eval_action, eval_rnn_states = eval_out
-                    eval_reconstructions = None
-                else:
-                    raise ValueError("Unexpected act() output length: {}".format(len(eval_out)))
-                
-                eval_action = _t2n(eval_action)
-                eval_rnn_states = np.array(np.split(_t2n(eval_rnn_states), self.n_eval_rollout_threads))
+            elif intervention_type != 'normal':
+                raise ValueError("Unknown intervention_type: {}".format(intervention_type))
+
+            # Build the centralized critic obs exactly as during training (centralized-V):
+            # concat all agents' obs, replicated per agent -> [n_envs*n_agents, n_agents*obs_dim].
+            obs = np.concatenate(eval_obs)
+            if self.use_centralized_V:
+                cent_obs = eval_obs.reshape(self.n_eval_rollout_threads, -1)
+                cent_obs = np.expand_dims(cent_obs, 1).repeat(self.num_agents, axis=1)
+                cent_obs = np.concatenate(cent_obs)
+            else:
+                cent_obs = obs
+
+            # Communication-aware action path. No silent fallback: real errors surface so a
+            # broken intervention can never masquerade as a message-free rollout.
+            policy_out = self.trainer.policy.get_actions(
+                cent_obs,
+                obs,
+                np.concatenate(eval_rnn_states),
+                np.concatenate(eval_rnn_states),
+                np.concatenate(eval_masks),
+                deterministic=True,
+                messages=messages_for_policy
+            )
+
+            if len(policy_out) == 6:
+                _, eval_action, _, eval_rnn_states_new, _, eval_messages_out = policy_out
+                eval_messages = _t2n(eval_messages_out)
+            elif len(policy_out) == 5:
+                _, eval_action, _, eval_rnn_states_new, _ = policy_out
                 eval_messages = None
+            else:
+                raise ValueError("Unexpected get_actions() output length: {}".format(len(policy_out)))
+
+            eval_reconstructions = None
+            eval_rnn_states = np.array(np.split(_t2n(eval_rnn_states_new), self.n_eval_rollout_threads))
+            eval_action = _t2n(eval_action)
 
             eval_actions = np.array(np.split(eval_action, self.n_eval_rollout_threads))
             
@@ -353,31 +360,213 @@ class MPERunner(Runner):
 
         return np.array(eval_episode_rewards)
 
+    @staticmethod
+    def _action_kl(dist_p, dist_q):
+        """
+        KL divergence between two action distributions (or lists of distributions, for
+        multi_discrete / mixed action spaces), summed over action dimensions.
+        :return: (torch.Tensor) [batch_size] KL divergence per sample.
+        """
+        if isinstance(dist_p, list):
+            kl = None
+            for p, q in zip(dist_p, dist_q):
+                k = torch.distributions.kl_divergence(p, q)
+                if k.dim() > 1:
+                    k = k.sum(-1)
+                kl = k if kl is None else kl + k
+            return kl
+        else:
+            kl = torch.distributions.kl_divergence(dist_p, dist_q)
+            if kl.dim() > 1:
+                kl = kl.sum(-1)
+            return kl
+
+    @torch.no_grad()
+    def _eval_causal_influence(self):
+        """
+        Causal Influence of Communication (CIC): for each agent, measure the effect of an
+        intervention that ablates (zeroes) its incoming aggregated message on (a) its action
+        distribution (KL divergence vs. the non-intervened distribution) and (b) the critic's
+        value estimate (|value_real - value_ablated|). The trajectory itself follows the
+        normal (non-intervened) policy; the intervention is only used to measure sensitivity
+        at each visited state.
+
+        :return: (dict) per-agent and mean KL / value-sensitivity arrays.
+        """
+        n_envs = self.n_eval_rollout_threads
+        n_agents = self.num_agents
+        message_dim = self.all_args.hidden_size
+
+        eval_obs = self.eval_envs.reset()
+        eval_rnn_states = np.zeros((n_envs, *self.buffer.rnn_states.shape[2:]), dtype=np.float32)
+        eval_masks = np.ones((n_envs, n_agents, 1), dtype=np.float32)
+        eval_aggregated_messages = np.zeros((n_envs * n_agents, message_dim), dtype=np.float32)
+
+        kl_sums = np.zeros(n_agents, dtype=np.float64)
+        value_sensitivity_sums = np.zeros(n_agents, dtype=np.float64)
+
+        for eval_step in range(self.episode_length):
+            self.trainer.prep_rollout()
+
+            obs = np.concatenate(eval_obs)
+            if self.use_centralized_V:
+                cent_obs = eval_obs.reshape(n_envs, -1)
+                cent_obs = np.expand_dims(cent_obs, 1).repeat(n_agents, axis=1)
+                cent_obs = np.concatenate(cent_obs)
+            else:
+                cent_obs = obs
+            rnn_states = np.concatenate(eval_rnn_states)
+            masks = np.concatenate(eval_masks)
+            zero_messages = np.zeros_like(eval_aggregated_messages)
+
+            # CAUSAL INTERVENTION: ablate each agent's incoming message and measure the effect
+            # on its action distribution and value estimate, without altering the trajectory.
+            dist_real = self.trainer.policy.get_action_distribution(obs, rnn_states, masks, messages=eval_aggregated_messages)
+            dist_zero = self.trainer.policy.get_action_distribution(obs, rnn_states, masks, messages=zero_messages)
+            kl = self._action_kl(dist_real, dist_zero).detach().cpu().numpy().reshape(n_envs, n_agents)
+            kl_sums += kl.sum(axis=0)
+
+            values_real = self.trainer.policy.get_values(cent_obs, rnn_states, masks, messages=eval_aggregated_messages)
+            values_zero = self.trainer.policy.get_values(cent_obs, rnn_states, masks, messages=zero_messages)
+            value_delta = (values_real - values_zero).abs().detach().cpu().numpy().reshape(n_envs, n_agents)
+            value_sensitivity_sums += value_delta.sum(axis=0)
+
+            # Advance the trajectory using the normal (non-intervened) policy.
+            policy_out = self.trainer.policy.get_actions(
+                cent_obs, obs, rnn_states, rnn_states, masks,
+                deterministic=True, messages=eval_aggregated_messages)
+
+            if len(policy_out) == 6:
+                _, eval_action, _, eval_rnn_states_new, _, eval_messages_out = policy_out
+                eval_messages = _t2n(eval_messages_out)
+            else:
+                _, eval_action, _, eval_rnn_states_new, _ = policy_out
+                eval_messages = None
+
+            eval_rnn_states = np.array(np.split(_t2n(eval_rnn_states_new), n_envs))
+            eval_action = _t2n(eval_action)
+            eval_actions = np.array(np.split(eval_action, n_envs))
+
+            if self.eval_envs.action_space[0].__class__.__name__ == 'MultiDiscrete':
+                for i in range(self.eval_envs.action_space[0].shape):
+                    eval_uc_actions_env = np.eye(self.eval_envs.action_space[0].high[i] + 1)[eval_actions[:, :, i]]
+                    if i == 0:
+                        eval_actions_env = eval_uc_actions_env
+                    else:
+                        eval_actions_env = np.concatenate((eval_actions_env, eval_uc_actions_env), axis=2)
+            elif self.eval_envs.action_space[0].__class__.__name__ == 'Discrete':
+                eval_actions_env = np.squeeze(np.eye(self.eval_envs.action_space[0].n)[eval_actions], 2)
+            else:
+                raise NotImplementedError
+
+            eval_obs, _, eval_dones, _ = self.eval_envs.step(eval_actions_env)
+
+            eval_rnn_states[eval_dones == True] = np.zeros(((eval_dones == True).sum(), self.recurrent_N, self.hidden_size), dtype=np.float32)
+            eval_masks = np.ones((n_envs, n_agents, 1), dtype=np.float32)
+            eval_masks[eval_dones == True] = np.zeros(((eval_dones == True).sum(), 1), dtype=np.float32)
+
+            if eval_messages is not None:
+                messages_reshaped = eval_messages.reshape(n_envs, n_agents, message_dim)
+                eval_aggregated_messages_per_agent = np.zeros_like(messages_reshaped)
+                for agent_i in range(n_agents):
+                    mask = np.ones(n_agents, dtype=bool)
+                    mask[agent_i] = False
+                    eval_aggregated_messages_per_agent[:, agent_i, :] = messages_reshaped[:, mask, :].mean(axis=1)
+                eval_aggregated_messages = eval_aggregated_messages_per_agent.reshape(n_envs * n_agents, message_dim)
+            else:
+                eval_aggregated_messages = np.zeros((n_envs * n_agents, message_dim), dtype=np.float32)
+
+        kl_mean = kl_sums / self.episode_length
+        value_sensitivity_mean = value_sensitivity_sums / self.episode_length
+
+        results = {}
+        for agent_i in range(n_agents):
+            results['causal_influence_kl_agent%d' % agent_i] = np.array([kl_mean[agent_i]])
+            results['causal_influence_value_sensitivity_agent%d' % agent_i] = np.array([value_sensitivity_mean[agent_i]])
+        results['causal_influence_kl_mean'] = np.array([kl_mean.mean()])
+        results['causal_influence_value_sensitivity_mean'] = np.array([value_sensitivity_mean.mean()])
+        return results
+
+    def _save_causal_influence_csv(self, causal_influence_infos, total_num_steps):
+        """
+        Append the causal-influence metrics for this eval to a human-readable CSV under the
+        run directory, so results persist regardless of wandb/tensorboard.
+        File: <run_dir>/causal_influence.csv
+        """
+        import csv
+
+        csv_path = os.path.join(str(self.run_dir), "causal_influence.csv")
+        # Stable column order: total_num_steps first, then metric keys sorted.
+        metric_keys = sorted(causal_influence_infos.keys())
+        row = {"total_num_steps": total_num_steps}
+        for k in metric_keys:
+            val = causal_influence_infos[k]
+            row[k] = float(np.asarray(val).reshape(-1)[0])
+
+        write_header = not os.path.exists(csv_path)
+        with open(csv_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["total_num_steps"] + metric_keys)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+
+        print("[EVAL] Causal-influence metrics appended to {}".format(csv_path))
+
     @torch.no_grad()
     def eval(self, total_num_steps):
-        """Run evaluation with optional causal interventions on messages."""
+        """
+        Run evaluation with optional message interventions. The normal / no-message / noisy
+        conditions are run as Common-Random-Number-paired episodes (same initial layouts), and
+        averaged over several episodes to reduce variance, so the reward gaps between conditions
+        are causally attributable to the intervention rather than to the random layout.
+        """
         eval_env_infos = {}
-        
-        # Run normal evaluation
-        print("\n[EVAL] Running evaluation with NORMAL messages...")
-        eval_episode_rewards_normal = self._eval_with_intervention(intervention_type='normal')
-        eval_episode_rewards_normal = np.array(eval_episode_rewards_normal)
-        eval_env_infos['eval_normal_rewards'] = np.sum(eval_episode_rewards_normal, axis=0)
-        
-        # Run evaluation with disabled messages if flag set
-        if self.all_args.eval_disable_messages:
-            print("\n[EVAL] Running evaluation with DISABLED messages...")
-            eval_episode_rewards_no_msg = self._eval_with_intervention(intervention_type='no_messages')
-            eval_episode_rewards_no_msg = np.array(eval_episode_rewards_no_msg)
-            eval_env_infos['eval_no_message_rewards'] = np.sum(eval_episode_rewards_no_msg, axis=0)
-        
-        # Run evaluation with noisy messages if noise_std > 0
-        if self.all_args.eval_noise_std > 0:
-            print("\n[EVAL] Running evaluation with NOISY messages (std={})...".format(self.all_args.eval_noise_std))
-            eval_episode_rewards_noisy = self._eval_with_intervention(intervention_type='noisy')
-            eval_episode_rewards_noisy = np.array(eval_episode_rewards_noisy)
-            eval_env_infos['eval_noisy_message_rewards'] = np.sum(eval_episode_rewards_noisy, axis=0)
-        
+
+        n_crn_episodes = max(1, int(getattr(self.all_args, "eval_crn_episodes", 1)))
+        base_seed = self.all_args.seed * 100003 + int(total_num_steps)
+
+        run_no_msg = self.all_args.eval_disable_messages
+        run_noisy = self.all_args.eval_noise_std > 0
+
+        normal_returns, no_msg_returns, noisy_returns = [], [], []
+
+        print("\n[EVAL] Running {} CRN-paired episode(s) per condition...".format(n_crn_episodes))
+        for k in range(n_crn_episodes):
+            crn_seed = base_seed + k  # SAME seed reused across all conditions in this episode
+
+            normal_returns.append(np.sum(
+                self._eval_with_intervention(intervention_type='normal', crn_seed=crn_seed), axis=0))
+
+            if run_no_msg:
+                no_msg_returns.append(np.sum(
+                    self._eval_with_intervention(intervention_type='no_messages', crn_seed=crn_seed), axis=0))
+
+            if run_noisy:
+                noisy_returns.append(np.sum(
+                    self._eval_with_intervention(intervention_type='noisy', crn_seed=crn_seed), axis=0))
+
+        normal_returns = np.array(normal_returns)
+        eval_env_infos['eval_normal_rewards'] = np.mean(normal_returns, axis=0)
+
+        if run_no_msg:
+            no_msg_returns = np.array(no_msg_returns)
+            eval_env_infos['eval_no_message_rewards'] = np.mean(no_msg_returns, axis=0)
+            # CRN-controlled causal effect of communication on return (paired per episode).
+            eval_env_infos['eval_comm_effect_vs_no_message'] = np.mean(normal_returns - no_msg_returns, axis=0)
+
+        if run_noisy:
+            noisy_returns = np.array(noisy_returns)
+            eval_env_infos['eval_noisy_message_rewards'] = np.mean(noisy_returns, axis=0)
+            eval_env_infos['eval_comm_effect_vs_noisy'] = np.mean(normal_returns - noisy_returns, axis=0)
+
+        # Causal Influence of Communication (CIC): per-agent KL divergence and value
+        # sensitivity when each agent's incoming message is ablated.
+        if self.all_args.eval_causal_influence:
+            print("\n[EVAL] Measuring causal influence of communication...")
+            causal_influence_infos = self._eval_causal_influence()
+            eval_env_infos.update(causal_influence_infos)
+            self._save_causal_influence_csv(causal_influence_infos, total_num_steps)
+
         # Print and log results
         print("\n[EVAL RESULTS]")
         for key, val in eval_env_infos.items():

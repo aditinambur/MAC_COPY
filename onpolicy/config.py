@@ -237,8 +237,15 @@ def get_config():
     # evaluation-only interventions for causal analysis
     parser.add_argument("--eval_disable_messages", action='store_true',
         default=False, help='disable aggregated messages during evaluation for causal analysis')
-    parser.add_argument("--eval_noise_std", type=float, default=0.0,
+    parser.add_argument("--eval_noise_std", type=float, default=0.5,
         help='add Gaussian noise to messages during evaluation (std dev). If 0.0, no noise applied.')
+    parser.add_argument("--eval_causal_influence", action='store_false',
+        default=True, help='compute per-agent causal-influence-of-communication metrics '
+                            '(KL divergence and value sensitivity to message ablation) during evaluation')
+    parser.add_argument("--eval_crn_episodes", type=int, default=8,
+        help='number of Common-Random-Number-paired episodes to average over per eval condition '
+             '(normal / no_message / noisy share the same initial layouts each episode). '
+             'Higher reduces evaluation variance.')
 
     # contrastive parameters
     parser.add_argument("--contrastive", action='store_true', default=False, help='use a contrastive')

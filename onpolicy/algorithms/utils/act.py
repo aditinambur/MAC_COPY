@@ -105,6 +105,21 @@ class ACTLayer(nn.Module):
 
         return action_probs
 
+    def get_distributions(self, x, available_actions=None):
+        """
+        Return the raw action distribution object(s) for the given inputs, for use in
+        analyses (e.g. KL divergence) that need more than samples or probabilities.
+        :param x: (torch.Tensor) input to network.
+        :param available_actions: (torch.Tensor) denotes which actions are available to agent
+                                  (if None, all actions available)
+
+        :return: a single distribution, or a list of distributions (multi_discrete / mixed action spaces).
+        """
+        if self.mixed_action or self.multi_discrete:
+            return [action_out(x) for action_out in self.action_outs]
+        else:
+            return self.action_out(x, available_actions)
+
     def evaluate_actions(self, x, action, available_actions=None, active_masks=None):
         """
         Compute log probability and entropy of given actions.
