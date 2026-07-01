@@ -18,3 +18,5 @@ logs
 *.png
 *ubyte
 *.gz
+node_modules/
+frontend/dist/

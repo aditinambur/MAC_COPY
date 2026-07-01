@@ -53,6 +53,10 @@ def main(args):
         assert (all_args.use_recurrent_policy or all_args.use_naive_recurrent_policy), ("check recurrent policy!")
     elif all_args.algorithm_name == "macppo" or all_args.algorithm_name == "memo_ppo":
         assert (all_args.use_recurrent_policy or all_args.use_naive_recurrent_policy), ("check recurrent policy!")
+    elif all_args.algorithm_name == "mappo":
+        all_args.use_recurrent_policy = False
+        all_args.use_naive_recurrent_policy = False
+        assert (all_args.use_recurrent_policy == False and all_args.use_naive_recurrent_policy == False), ("check recurrent policy!")
     elif all_args.algorithm_name == "mappo_comm":
         assert (all_args.use_recurrent_policy == False and all_args.use_naive_recurrent_policy == False), (
             "check recurrent policy!")
@@ -88,6 +92,7 @@ def main(args):
         os.makedirs(str(run_dir))
     
     # wandb
+    all_args.use_wandb = False
     if all_args.use_wandb:
         run = wandb.init(config=all_args,
                          project=all_args.env_name,
