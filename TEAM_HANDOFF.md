@@ -81,6 +81,8 @@ have been retired and are not counted anywhere.
 | 7 | more agents, from genuinely new training runs | 🔴 **8 usable agents needed, from 8 separate runs** (have 2 runs) — see item 7 |
 | 8 | test the part that picks how big a fix to try | 🟡 it escalates correctly, but has never once picked anything other than the middle option |
 | 9 | replace the broken "best agent" picker | 🔴 **needs a proper fix** — see item 9 |
+| 10 | break the system a *different* way | 🔴 not started — every result so far uses one kind of break |
+| 11 | try it with 3 agents instead of 2 | 🔴 not started — needed before claiming anything about "who to listen to" |
 
 **The short version:** the two comparisons that carry the project (items 2 and 3) have gone
 3-for-3 in the right direction. Nothing is proven yet because 3 runs cannot support statistics,
@@ -89,7 +91,7 @@ defensible result.
 
 ## What's required next, in priority order
 
-These nine are the minimum needed before any of the results above can be trusted or
+These eleven are the minimum needed before any of the results above can be trusted or
 written up. Everything else discussed (different kinds of environment breaks, per-agent
 breakdowns, etc.) comes after these, not alongside them.
 
@@ -262,3 +264,45 @@ hand-picked answer on the three runs we already have (where we know which checkp
 Whichever is chosen, validate it the same way: does it pick the checkpoint we would have picked
 by hand, on all three existing runs? Until something passes that test, do not point
 `--model_dir` at `checkpoint_best`.
+
+**10. Break the system in a second, different way — not just harder or softer.**
+
+Every result in this project comes from **one** kind of break: flipping the agent's sense of
+where its partner is. That is enough to show the repair works, but it is not enough to claim the
+*detector* is general. As written, "our system notices when communication breaks" really means
+"our system notices when this one specific thing breaks."
+
+Item 8 asks for the same break at different strengths. This item is different: a break of a
+different **kind**. Two options, both straightforward to add:
+
+- **Agent dropout** — one agent stops sending messages entirely for part of an episode. Tests
+  whether the detector notices communication *disappearing* rather than becoming *misleading*.
+- **Vocabulary corruption** — shuffle or randomise the token embeddings, so the words still
+  arrive but no longer mean what they meant. This is arguably the more interesting one, because
+  it is the failure the `embedding` repair target was designed for, and that target has never
+  once been used.
+
+Run the same three comparisons on it. If the detector fires and the repair works on a second kind
+of break, "perturbation-agnostic" becomes a claim you can defend. If it does not, that is a real
+limitation and much better found now.
+
+**11. Try it with 3 agents instead of 2 — before claiming anything about "who to listen to".**
+
+The system contains a learned `attention_weight` whose stated purpose is letting each agent decide
+which sender to weight more heavily. **With exactly 2 agents it does nothing at all**, and this is
+not a suspicion — it is arithmetic. Each agent has exactly one possible sender (itself is masked
+out), and a softmax over a single option is always 1.0 no matter what the weight says. We verified
+it three ways: the output is bit-identical across wildly different weight values, the gradient is
+exactly zero, and the parameter did not move by a single bit across 2 million training steps.
+
+**So do not describe the system as learning who to trust, or as using attention, while it runs
+with 2 agents.** It is scaffolding that currently does nothing.
+
+Running with `--num_agents 3` makes it real: three agents means two possible senders, so the
+softmax has an actual choice to make and the parameter starts receiving gradient. That is what
+turns the attention mechanism from an unused component into a contribution.
+
+Expect this to need its own training runs and its own tuning — three agents is a harder
+coordination problem, and none of the thresholds have been checked at that scale. Placed last
+because it is the largest piece of new work on this list, but it is the one that unlocks a claim
+the project currently cannot make.

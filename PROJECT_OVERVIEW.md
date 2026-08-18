@@ -922,14 +922,21 @@ number, never tuned or tested against data:
 | comm acceptance bar | `--accept_comm_recovery` | 0.30 | `accept_repair` |
 | naive-trigger cutoff | `--reward_only_drop_ratio` | 0.30 | `detect_degradation_reward_only` |
 
-This is not hypothetical risk: on the one real seed-1 run (§5.10), `reward_drop_ratio`
-came out at **0.473** — 3 percentage points from the 0.50 `select_severe_reward_ratio`
-cutoff that decides whether the controller tries `comm` first or jumps straight to `full`.
-A few points either way and the entire "controller starts minimal, escalates only when
-needed" narrative for that run would not exist. **Once §9.3's multi-seed runs exist**,
-re-check each cutoff against the spread of `reward_drop_ratio`/`value_sens_ratio` values
-actually observed across seeds — if real results cluster near a cutoff, that cutoff is
-reporting a coin flip, not a decision, and needs to move or be justified explicitly.
+This is not hypothetical risk — it has already decided results. The three current-code
+agents produced `reward_drop_ratio` values of **0.2406**, **0.2981** and **0.2995**, all
+sitting just below the 0.30 `--reward_only_drop_ratio` cutoff. Two of them miss it by
+**0.0005** and **0.0019**. Those two runs are the evidence that causal triggering beats
+reward-only triggering (§5.10), and a shift of two thousandths in either direction would
+erase them. Only the third (margin 0.0594) is robust to the cutoff's exact value.
+
+The same clustering makes `--select_sharp_value_sens_ratio` (0.50) untested from the other
+direction: `value_sensitivity` has *risen* under degradation in every run measured, so the
+`embedding` branch it gates has never once fired.
+
+**Once §9.3's multi-seed runs exist**, re-check each cutoff against the spread of
+`reward_drop_ratio` / `value_sens_ratio` actually observed across seeds. If real results
+cluster near a cutoff — as they currently do around 0.30 — that cutoff is reporting a coin
+flip, not a decision, and needs to move or be justified explicitly.
 
 ---
 
