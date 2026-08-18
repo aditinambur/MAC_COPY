@@ -44,7 +44,7 @@ for real, not just on paper.
   separate batch of episodes and re-runs the same accept test, printing
   `HELD-OUT CONFIRMS` or `HELD-OUT DOES NOT CONFIRM`. **This has been run and it confirmed**
   (see `PROJECT_OVERVIEW.md` §5.11). Nothing to do here — just don't ignore the verdict when
-  you run items 2-5: a `DOES NOT CONFIRM` means that run's recovery number does not get
+  you run items 3-5: a `DOES NOT CONFIRM` means that run's recovery number does not get
   written up as a success.
 
 ## What we already found (three runs each — consistent, but not yet statistically proven)
@@ -70,23 +70,23 @@ for real, not just on paper.
 Everything below was run on the **current** code. Earlier runs on the old communication code
 have been retired and are not counted anywhere.
 
-| # | what it is | status |
-|---|---|---|
-| **1** | **replace the broken "best agent" picker — do this first** | 🔴 **needs a proper fix; everything else depends on it** |
-| 2 | run the system on several different trained agents | 🟡 3 agents repaired successfully, but from only **2 training runs** of the 8 needed |
-| 3 | compare against the "naive trigger" | 🟡 **3 for 3** — and one of them by a comfortable margin |
-| 4 | compare against the "generic fix" | 🟡 **3 for 3** — the real fix won every time |
-| 5 | compare against doing nothing | 🔴 needs rethinking, not repeating — it is trivially 0% by construction |
-| 6 | check the differences are real, with statistics | 🔴 not started — needs ≥5 agents to reach p<0.05 (item 8 supplies them) |
-| 7 | check the cutoff numbers are sensible | 🟡 plenty of evidence gathered, no analysis done |
-| 8 | more agents, from genuinely new training runs | 🔴 **8 usable agents needed, from 8 separate runs** (have 2 runs) |
-| 9 | test the part that picks how big a fix to try | 🟡 it escalates correctly, but has never once picked anything other than the middle option |
-| 10 | break the system a *different* way | 🔴 not started — every result so far uses one kind of break |
-| 11 | try it with 3 agents instead of 2 | 🔴 not started — needed before claiming anything about "who to listen to" |
+| # | what it is | tier | status |
+|---|---|---|---|
+| **1** | replace the broken "best agent" picker | 🔴 must | **do this first** — everything else depends on it |
+| **2** | train 8 usable agents, from 8 separate runs | 🔴 must | have 2 runs of the 8 needed |
+| **3** | run the full system on every agent | 🔴 must | 3 agents repaired and confirmed, from 2 runs |
+| **4** | compare against the "generic fix" | 🔴 must | **3 for 3** — the real fix won every time |
+| **5** | compare against the "naive trigger" | 🔴 must | **3 for 3** — one by a comfortable margin |
+| **6** | statistics across the runs | 🔴 must | not started — needs ≥5 agents for p<0.05 |
+| 7 | check the cutoff numbers | 🟠 advisable | evidence gathered, no analysis done |
+| 8 | test the part that picks how big a fix to try | ⚪ optional | escalates correctly, but has never picked differently |
+| 9 | break the system a *different* way | ⚪ optional | not started |
+| 10 | try it with 3 agents instead of 2 | ⚪ optional | not started |
+| 11 | the "do nothing" control | ⚪ optional | trivially 0% by construction — explain rather than run |
 
-**The short version:** the two comparisons that carry the project (items 3 and 4) have gone
+**The short version:** the two comparisons that carry the project (items 4 and 5) have gone
 3-for-3 in the right direction. Nothing is proven yet because 3 runs cannot support statistics,
-and they come from only 2 training runs. Item 1 is half a day and unblocks everything; items 6 and 8 are what stand between this
+and they come from only 2 training runs. Item 1 is half a day and unblocks everything; items 2 and 6 are what stand between this
 and a defensible result.
 
 ## If you run out of time — what can be dropped, and what it costs
@@ -99,29 +99,28 @@ protect and what to let go, and **what claim you have to give up** for each thin
 | # | why |
 |---|---|
 | **1** | half a day, and everything else is slower and riskier without it |
-| **8** | supplies the agents that items 2–4 run on. Nothing else can start without it |
-| **3** | one of the two claims the project is actually about |
-| **4** | the other one |
+| **2** | supplies the agents everything else runs on. Nothing can start without it |
+| **4** | one of the two claims the project is actually about |
+| **5** | the other one |
 | **6** | without statistics, "3 out of 3" is an anecdote. This is what turns the results into a finding |
 
 ### Strongly worth having
 
 | # | why |
 |---|---|
-| **2** | mostly comes free — it is the same runs as items 3 and 4, just recorded properly |
 | **7** | cheap once the data exists, and reviewers *will* ask. Two of our current results turned on a margin of 0.002 |
 
 ### Can be dropped — but say so, and give up the matching claim
 
 | # | if you drop it | the claim you must not make |
 |---|---|---|
-| **5** | Barely costs anything. The "do nothing" arm is trivially 0% by construction, because the measurement is deterministic — a policy that got no gradient step reproduces the broken numbers exactly. **Just explain that in one sentence instead of running it.** | none |
-| **9** | Costs a framing change. | Do not say the system **chooses** which repair to try. It has picked the same option every single time, and one of its three branches has never activated. You can still say it **escalates** correctly when a repair fails — that is demonstrated. |
-| **10** | Costs a generality claim. | Do not say the detector is **perturbation-agnostic** or "works for environment changes" in general. Say it works for *this* change: flipping an agent's sense of where its partner is. |
-| **11** | Costs the attention claim. | Do not describe the system as learning **who to listen to**, or as using attention in any meaningful sense. With 2 agents that component provably does nothing. Either drop the claim or state plainly that the mechanism is scaffolding for 3+ agents and is currently inert. |
+| **8** | Costs a framing change. | Do not say the system **chooses** which repair to try. It has picked the same option every single time, and one of its three branches has never activated. You can still say it **escalates** correctly when a repair fails — that is demonstrated. |
+| **9** | Costs a generality claim. | Do not say the detector is **perturbation-agnostic** or "works for environment changes" in general. Say it works for *this* change: flipping an agent's sense of where its partner is. |
+| **10** | Costs the attention claim. | Do not describe the system as learning **who to listen to**, or as using attention in any meaningful sense. With 2 agents that component provably does nothing. Either drop the claim or state plainly that the mechanism is scaffolding for 3+ agents and is currently inert. |
+| **11** | Barely costs anything. The "do nothing" arm is trivially 0% by construction, because the measurement is deterministic — a policy that got no gradient step reproduces the broken numbers exactly. **Just explain that in one sentence instead of running it.** | none |
 
-**The short version:** items 1, 3, 4, 6 and 8 are the paper. Items 2 and 7 make it solid. Items
-5, 9, 10 and 11 are each worth a sentence in a "limitations" section if you cannot get to them —
+**The short version:** items 1–6 are the paper. Item 7 makes it solid. Items
+8, 9, 10 and 11 are each worth a sentence in a "limitations" section if you cannot get to them —
 which is a perfectly respectable place for them to be, as long as the corresponding claim is not
 made anywhere else in the paper.
 
@@ -131,11 +130,12 @@ These eleven are the minimum needed before any of the results above can be trust
 written up. Everything else discussed (different kinds of environment breaks, per-agent
 breakdowns, etc.) comes after these, not alongside them.
 
-**1. FIRST — design a replacement for the broken "best agent" picker.**
+**1. Design a replacement for the broken "best agent" picker.**  
+🔴 **MUST HAVE**
 
 *Do this before any of the experiments below.* It is about half a day of work, and
 skipping it means doing eight manual checkpoint sweeps by hand and risking that someone
-runs a full set of experiments on a weak agent without noticing. Everything from item 2
+runs a full set of experiments on a weak agent without noticing. Everything from item 3
 onward depends on picking the right agent to test.
 
 At the end of training the system saves what it thinks is the best version of the agent into a
@@ -156,7 +156,7 @@ early fluke wins permanently and is never revisited.
 
 **This item is not "check it by hand" — that is only the stopgap.** For now, sweep the 3–4
 checkpoints with the highest `causal_influence_kl_mean` from that run's `causal_influence.csv`,
-run each with `--no_repair`, and pick using the thresholds in item 8. Budget ~4 minutes per
+run each with `--no_repair`, and pick using the thresholds in item 2. Budget ~4 minutes per
 candidate.
 
 **What is actually needed is a better rule.** Some options worth trying and comparing against the
@@ -175,65 +175,8 @@ Whichever is chosen, validate it the same way: does it pick the checkpoint we wo
 by hand, on all three existing runs? Until something passes that test, do not point
 `--model_dir` at `checkpoint_best`.
 
-**2. Run the automatic system multiple times with different starting points (seeds), on
-the setup we already have.**
-Right now it's only been proven to work once. Each run uses a different random starting
-layout and a different stream of randomness during training, so running it several times
-checks whether the system reliably notices the problem, picks a sensible fix, and
-succeeds — across different conditions — rather than us having gotten lucky on the one
-run we tried.
-
-**3. Run the "naive trigger" comparison the same number of times, on the same starting
-points.**
-This is the project's main claim: that being selective about *when* to fix
-communication — only stepping in when communication itself looks like the problem — is
-better than a blunt version that fixes things whenever the score drops, for any reason.
-Right now the smart version and the naive version made the exact same call on the one test
-we ran, so there's currently zero evidence this claim is true. It might be — we just
-haven't tested a case where the two versions would actually disagree yet.
-
-**4. Run the "generic fix" comparison the same number of times, on the same starting
-points.**
-The system's normal fix only retrains the small part of the network responsible for
-communication — what an agent says and what its messages mean. The comparison version
-retrains a different, similarly small part of the network that has nothing to do with
-communication, as a fairness check. If the generic fix works just as well, that would mean
-the recovery isn't really about "fixing communication" — it would just show that
-retraining *any* similar-sized piece helps. On the one test so far, the real fix did
-slightly better, but not by enough to be sure it's a real difference and not luck.
-
-**5. Run the "no fix at all" comparison the same number of times, on the same starting
-points.**
-This checks what happens if nothing is done after the environment breaks, so we have a
-solid "before" number to measure every fix against — confirming that number is stable and
-not just noise from one lucky or unlucky run.
-
-**6. Put all of those results together and check if the differences are real, not just
-luck.**
-With only one run per comparison, we can't tell a genuine pattern from random chance. This
-step takes the repeated runs from items 2-5 and actually checks — using proper
-statistics — whether "fixing communication beats a generic fix" or "being selective beats
-the naive version" are real effects, or just how those particular single runs happened to
-go. Without this step, none of the repeated running matters, no matter how many times it's
-done.
-
-**7. Check whether the cutoff numbers used throughout the system are actually reasonable,
-not just convenient guesses.** *(elevated — do this right after item 6, not last)*
-There are eight different cutoff numbers scattered through the system — for example, "the
-score has to drop by at least 15% before we suspect a problem," or "at least 30% of the
-loss has to be recovered before a fix counts as accepted." Every one of them was picked as
-a round, reasonable-sounding number, never tested. On the one real run we have, the score
-drop landed at 47% — just 3 points from the 50% cutoff that decides whether the system
-tries a small fix first or jumps straight to the biggest one. A few points either way would
-have told a completely different story. Once items 2-5 produce several repeated runs, this
-step goes back through those cutoff numbers and checks whether the results would have come
-out differently with slightly different cutoffs — telling us whether the current numbers
-are actually reasonable or just happened to work for the handful of runs tried so far. This
-can't run before items 2-5 exist (it needs their output to check against), but it matters
-enough that it shouldn't be left until last either — a wrong cutoff quietly affects every
-other result on this list, so it's worth confirming early.
-
-**8. Train 8 usable agents, from 8 separate training runs. Budget for about 12 runs.**
+**2. Train 8 usable agents, from 8 separate training runs. Budget for about 12 runs.**  
+🔴 **MUST HAVE**
 
 Everything so far comes from **two** training runs. For AAMAS the target is **8 usable agents,
 each from its own independent training run.** Five is the absolute floor; eight is what makes the
@@ -291,8 +234,69 @@ the smart version was right, but only just. If that pattern repeats across 8 age
 visible in your own table rather than discovered by a reviewer. The third margin was 0.0594,
 which is the kind you can lean on.
 
-**9. Actually test the part of the system that decides how big a fix to try, instead of
-letting it default to the same choice every time.**
+**3. Run the full detect-and-repair system on every agent from item 2.**  
+🔴 **MUST HAVE**
+
+This is the primary result table: for each of the 8 agents, does the system notice the
+problem, pick a sensible fix, and succeed? It has worked on 3 agents so far, all of which
+also passed the fresh-episode re-check — but those come from only 2 training runs.
+
+Each run takes about 14 minutes. Record for every agent: whether the break was detected,
+which fix was chosen, whether it was accepted, and whether the fresh-episode check
+confirmed it. Items 4 and 5 are the same runs with one setting changed, so do all three
+arms per agent in one go rather than sweeping the whole set three times.
+
+**4. Run the "generic fix" comparison the same number of times, on the same starting
+points.**  
+🔴 **MUST HAVE**
+The system's normal fix only retrains the small part of the network responsible for
+communication — what an agent says and what its messages mean. The comparison version
+retrains a different, similarly small part of the network that has nothing to do with
+communication, as a fairness check. If the generic fix works just as well, that would mean
+the recovery isn't really about "fixing communication" — it would just show that
+retraining *any* similar-sized piece helps. On the one test so far, the real fix did
+slightly better, but not by enough to be sure it's a real difference and not luck.
+
+**5. Run the "naive trigger" comparison the same number of times, on the same starting
+points.**  
+🔴 **MUST HAVE**
+This is the project's main claim: that being selective about *when* to fix
+communication — only stepping in when communication itself looks like the problem — is
+better than a blunt version that fixes things whenever the score drops, for any reason.
+Right now the smart version and the naive version made the exact same call on the one test
+we ran, so there's currently zero evidence this claim is true. It might be — we just
+haven't tested a case where the two versions would actually disagree yet.
+
+**6. Put all of those results together and check if the differences are real, not just
+luck.**  
+🔴 **MUST HAVE**
+With only one run per comparison, we can't tell a genuine pattern from random chance. This
+step takes the repeated runs from items 2-5 and actually checks — using proper
+statistics — whether "fixing communication beats a generic fix" or "being selective beats
+the naive version" are real effects, or just how those particular single runs happened to
+go. Without this step, none of the repeated running matters, no matter how many times it's
+done.
+
+**7. Check whether the cutoff numbers used throughout the system are actually reasonable,
+not just convenient guesses.**  
+🟠 **ADVISABLE**
+There are eight different cutoff numbers scattered through the system — for example, "the
+score has to drop by at least 15% before we suspect a problem," or "at least 30% of the
+loss has to be recovered before a fix counts as accepted." Every one of them was picked as
+a round, reasonable-sounding number, never tested. On the one real run we have, the score
+drop landed at 47% — just 3 points from the 50% cutoff that decides whether the system
+tries a small fix first or jumps straight to the biggest one. A few points either way would
+have told a completely different story. Once items 2-5 produce several repeated runs, this
+step goes back through those cutoff numbers and checks whether the results would have come
+out differently with slightly different cutoffs — telling us whether the current numbers
+are actually reasonable or just happened to work for the handful of runs tried so far. This
+can't run before items 2-5 exist (it needs their output to check against), but it matters
+enough that it shouldn't be left until last either — a wrong cutoff quietly affects every
+other result on this list, so it's worth confirming early.
+
+**8. Actually test the part of the system that decides how big a fix to try, instead of
+letting it default to the same choice every time.**  
+⚪ **OPTIONAL** — can be dropped, with a stated limitation
 There's a piece of the system whose whole job is to look at how bad things are and decide
 between a small fix, a medium fix, or a big one. So far, every real test has used the exact
 same break at the exact same strength — so this piece has picked the same option almost
@@ -306,14 +310,15 @@ cutoff numbers, this piece of the system can't demonstrate it's needed until it'
 been given a chance to choose differently. Placed last because, unlike items 2-8, it needs
 genuinely new experiments (a different break strength), not just repeats of what exists.
 
-**10. Break the system in a second, different way — not just harder or softer.**
+**9. Break the system in a second, different way — not just harder or softer.**  
+⚪ **OPTIONAL** — can be dropped, with a stated limitation
 
 Every result in this project comes from **one** kind of break: flipping the agent's sense of
 where its partner is. That is enough to show the repair works, but it is not enough to claim the
 *detector* is general. As written, "our system notices when communication breaks" really means
 "our system notices when this one specific thing breaks."
 
-Item 9 asks for the same break at different strengths. This item is different: a break of a
+Item 8 asks for the same break at different strengths. This item is different: a break of a
 different **kind**. Two options, both straightforward to add:
 
 - **Agent dropout** — one agent stops sending messages entirely for part of an episode. Tests
@@ -327,7 +332,8 @@ Run the same three comparisons on it. If the detector fires and the repair works
 of break, "perturbation-agnostic" becomes a claim you can defend. If it does not, that is a real
 limitation and much better found now.
 
-**11. Try it with 3 agents instead of 2 — before claiming anything about "who to listen to".**
+**10. Try it with 3 agents instead of 2 — before claiming anything about "who to listen to".**  
+⚪ **OPTIONAL** — can be dropped, with a stated limitation
 
 The system contains a learned `attention_weight` whose stated purpose is letting each agent decide
 which sender to weight more heavily. **With exactly 2 agents it does nothing at all**, and this is
@@ -347,3 +353,10 @@ Expect this to need its own training runs and its own tuning — three agents is
 coordination problem, and none of the thresholds have been checked at that scale. Placed last
 because it is the largest piece of new work on this list, but it is the one that unlocks a claim
 the project currently cannot make.
+
+**11. Run the "no fix at all" comparison the same number of times, on the same starting
+points.**  
+⚪ **OPTIONAL** — can be dropped, with a stated limitation
+This checks what happens if nothing is done after the environment breaks, so we have a
+solid "before" number to measure every fix against — confirming that number is stable and
+not just noise from one lucky or unlucky run.
