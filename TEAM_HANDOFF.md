@@ -47,20 +47,49 @@ for real, not just on paper.
   you run items 1-4: a `DOES NOT CONFIRM` means that run's recovery number does not get
   written up as a success.
 
-## What we already found (one test run each — not yet proven, needs repeating)
+## What we already found (three runs each — consistent, but not yet statistically proven)
 
-- **The "smart" system and a "naive" version tied exactly.** The naive version decides
-  whether to fix things using only the score, ignoring anything about whether
-  communication itself looks broken. On the one test we ran, both versions made the
-  identical decision and produced the identical fix. That's not evidence either way yet —
-  it just means this particular test wasn't hard enough to tell them apart.
-- **Fixing communication specifically did slightly better than a generic fix of the same
-  size**, but only by a small margin (about 5-9 percentage points), which could easily be
-  random noise from a single run rather than a real effect.
+- **The "smart" system beat the "naive" one — twice, but only just.** The naive version
+  decides whether to fix things using only the score. On two different trained agents, the
+  smart version spotted the problem and produced a fix that held up on fresh test runs, while
+  the naive version did nothing at all. The catch: both times the score drop landed a hair
+  under the naive version's cutoff (0.2995 and 0.2981 against a cutoff of 0.30). So the two
+  genuinely disagree, and the smart one was right both times, but the margin was tiny. Item 2
+  below still needs a case where they disagree by a comfortable margin.
+- **Fixing communication specifically clearly beat a generic fix of the same size — twice.**
+  On one agent the generic fix looked fine at first and then failed the fresh-test-run check
+  outright. On the other it was rejected immediately. Meanwhile the communication fix passed
+  both times. This is the strongest evidence we have that the recovery really is about
+  repairing communication, though it is still only two runs.
+- **The fix costs something on the original task, and we under-called this earlier.** After a
+  repair the agents are worse at the *unbroken* version of the game — by 17.3% in the worst
+  case so far. The bigger the fix, the bigger the cost. Any write-up should say so.
+
+## Where things stand right now
+
+Everything below was run on the **current** code. Earlier runs on the old communication code
+have been retired and are not counted anywhere.
+
+| # | what it is | status |
+|---|---|---|
+| 1 | run the system on several different trained agents | 🟡 3 agents repaired successfully, but from only **2 training runs** of the 8 needed |
+| 2 | compare against the "naive trigger" | 🟡 **3 for 3** — and one of them by a comfortable margin |
+| 3 | compare against the "generic fix" | 🟡 **3 for 3** — the real fix won every time |
+| 4 | compare against doing nothing | 🔴 needs rethinking, not repeating — see item 4 |
+| 5 | check the differences are real, with statistics | 🔴 not started — needs ≥5 agents to reach p<0.05 (see item 7) |
+| 6 | check the cutoff numbers are sensible | 🟡 plenty of evidence gathered, no analysis done |
+| 7 | more agents, from genuinely new training runs | 🔴 **8 usable agents needed, from 8 separate runs** (have 2 runs) — see item 7 |
+| 8 | test the part that picks how big a fix to try | 🟡 it escalates correctly, but has never once picked anything other than the middle option |
+| 9 | replace the broken "best agent" picker | 🔴 **needs a proper fix** — see item 9 |
+
+**The short version:** the two comparisons that carry the project (items 2 and 3) have gone
+3-for-3 in the right direction. Nothing is proven yet because 3 runs cannot support statistics,
+and they come from only 2 training runs. Items 5, 7 and 9 are what stand between this and a
+defensible result.
 
 ## What's required next, in priority order
 
-These eight are the minimum needed before any of the results above can be trusted or
+These nine are the minimum needed before any of the results above can be trusted or
 written up. Everything else discussed (different kinds of environment breaks, per-agent
 breakdowns, etc.) comes after these, not alongside them.
 
@@ -122,10 +151,63 @@ can't run before items 1-4 exist (it needs their output to check against), but i
 enough that it shouldn't be left until last either — a wrong cutoff quietly affects every
 other result on this list, so it's worth confirming early.
 
-**7. Repeat the same full comparison on a different, already-trained agent.**
-Everything tested so far has used one specific trained agent. Running the same comparisons
-on a second, independently trained agent checks whether the results are actually about how
-the *system* works in general, or whether they just happened to be true for this one agent.
+**7. Train 8 usable agents, from 8 separate training runs. Budget for about 12 runs.**
+
+Everything so far comes from **two** training runs. For AAMAS the target is **8 usable agents,
+each from its own independent training run.** Five is the absolute floor; eight is what makes the
+result comfortable.
+
+**Why 5 is the floor.** Both comparisons produce a yes/no outcome per agent, so the natural
+analysis is a sign test. Five-for-five gives p = 0.031, six-for-six gives p = 0.016. **Below five
+you cannot reach p < 0.05 no matter how clean the results are.** The current three-for-three sits
+at p = 0.125 — consistent, but not significant.
+
+**Why 8 rather than 5.** Two reasons specific to this setup:
+
+- **Different checkpoints from the same training run do not count as separate agents.** Two of
+  our three current agents come from the same run, 64,000 steps apart. A reviewer will count that
+  as one sample, not two. **The unit is the training run.**
+- **The naive-trigger comparison does not produce a result on every agent.** It only tells you
+  anything when the reward drop lands between 0.15 and 0.30 — above that both versions react and
+  you get an uninformative tie, below that neither does. All three of ours happened to land in
+  that window, which was luck. At roughly a 50–60% hit rate, 8 agents yields about 5 usable
+  trigger comparisons, which just clears the floor. The generic-fix comparison uses every agent,
+  so 8 is comfortable there.
+
+**Why 12 training runs.** Roughly one run in three produces an agent too weak to use, so expect
+to discard about four.
+
+**What counts as too weak to use.** Run `--no_repair` on a candidate and read two numbers:
+
+- **`comm_effect`** — how much reward the messages are worth. Below about **+150** the agent
+  barely uses them. Two of our checkpoints measured +116.9 and +139.1 and were useless here.
+- **reward drop under the break** — below about **0.16** the repair has always failed, and below
+  0.15 the detector correctly refuses to fire at all.
+
+**What a good agent looks like:** `comm_effect` around **+300 or more** and a reward drop around
+**0.24 or more**. All three agents that repaired successfully sat in that range (+326.0 / 0.300,
++534.9 / 0.298, +402.5 / 0.241).
+
+**Time per usable agent:** ~40 min training, ~16 min sweeping its checkpoints (item 9), ~35 min
+for the three comparison arms. Call it 90 minutes, mostly unattended. Twelve runs including the
+discards is roughly 15 hours of compute — comfortable across two weeks if it is started early and
+run in the background rather than one-at-a-time by hand.
+
+### How to report it — two things reviewers check
+
+**Report every agent, including the weak ones you threw away.** "12 training runs, 8 usable,
+4 discarded for `comm_effect` below +150" is a *strength* — it shows you know how variable the
+training is, and it is honest about selection. Quietly dropping the failures is the single most
+common way a paper like this gets rejected. Keep a table of all 12 with their `comm_effect` and
+reward drop, and say which ones were used and why.
+
+**Report the trigger comparison as "k of n", on the agents where it actually applied — and list
+the drop ratios.** Do not report "the smart trigger beat the naive one" as a flat claim. Say how
+many agents produced a usable comparison, how many went each way, and what the margin was in
+each case. This matters because two of our three current margins are **0.0005** and **0.0019** —
+the smart version was right, but only just. If that pattern repeats across 8 agents, you want it
+visible in your own table rather than discovered by a reviewer. The third margin was 0.0594,
+which is the kind you can lean on.
 
 **8. Actually test the part of the system that decides how big a fix to try, instead of
 letting it default to the same choice every time.**
@@ -141,3 +223,42 @@ the cutoff numbers reasonable) but is a different question: even with perfectly-
 cutoff numbers, this piece of the system can't demonstrate it's needed until it's actually
 been given a chance to choose differently. Placed last because, unlike items 1-7, it needs
 genuinely new experiments (a different break strength), not just repeats of what exists.
+
+**9. Design a replacement for the broken "best agent" picker.**
+
+At the end of training the system saves what it thinks is the best version of the agent into a
+folder called `checkpoint_best`. **It has now picked badly in two of three runs**, and both times
+it buried the best agent that run actually produced:
+
+- One run chose a version from **3.5% into training** — an agent that had barely learned
+  anything. A single early evaluation happened to score a freak high value on one of the three
+  measures, and because that measure is weighted 100× in the scoring formula, nothing across the
+  remaining 1.9 million training steps ever beat it.
+- Another chose an agent whose communication was worth **+139**, while the final version of that
+  same agent was worth **+535** — nearly four times better, and the best agent produced anywhere
+  in this project. That run was written off as a failure for most of a day on the strength of the
+  wrong checkpoint.
+
+This is not bad luck. The score takes a running maximum across 60–90 noisy evaluations, so one
+early fluke wins permanently and is never revisited.
+
+**This item is not "check it by hand" — that is only the stopgap.** For now, sweep the 3–4
+checkpoints with the highest `causal_influence_kl_mean` from that run's `causal_influence.csv`,
+run each with `--no_repair`, and pick using the thresholds in item 7. Budget ~4 minutes per
+candidate.
+
+**What is actually needed is a better rule.** Some options worth trying and comparing against the
+hand-picked answer on the three runs we already have (where we know which checkpoint is right):
+
+- **Average over a window** instead of taking a single evaluation — e.g. score each checkpoint on
+  the mean of its own and its neighbours' evals, so one freak reading cannot win.
+- **Drop the 100× weighting on value-sensitivity**, or cap its contribution. It is the term that
+  caused both failures, and it is the least reliable of the three measures.
+- **Score on `comm_effect` directly** rather than a weighted blend — it is the quantity the repair
+  experiments actually care about, and it is already measured at every evaluation.
+- **Ignore the first ~20% of training** when selecting, since nothing that early is a serious
+  candidate.
+
+Whichever is chosen, validate it the same way: does it pick the checkpoint we would have picked
+by hand, on all three existing runs? Until something passes that test, do not point
+`--model_dir` at `checkpoint_best`.
