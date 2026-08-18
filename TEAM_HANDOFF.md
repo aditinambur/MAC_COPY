@@ -89,6 +89,42 @@ have been retired and are not counted anywhere.
 and they come from only 2 training runs. Item 1 is half a day and unblocks everything; items 6 and 8 are what stand between this
 and a defensible result.
 
+## If you run out of time — what can be dropped, and what it costs
+
+Two weeks is not enough for all eleven, especially starting cold on this repo. Here is what to
+protect and what to let go, and **what claim you have to give up** for each thing you drop.
+
+### Must have — without these there is no paper
+
+| # | why |
+|---|---|
+| **1** | half a day, and everything else is slower and riskier without it |
+| **8** | supplies the agents that items 2–4 run on. Nothing else can start without it |
+| **3** | one of the two claims the project is actually about |
+| **4** | the other one |
+| **6** | without statistics, "3 out of 3" is an anecdote. This is what turns the results into a finding |
+
+### Strongly worth having
+
+| # | why |
+|---|---|
+| **2** | mostly comes free — it is the same runs as items 3 and 4, just recorded properly |
+| **7** | cheap once the data exists, and reviewers *will* ask. Two of our current results turned on a margin of 0.002 |
+
+### Can be dropped — but say so, and give up the matching claim
+
+| # | if you drop it | the claim you must not make |
+|---|---|---|
+| **5** | Barely costs anything. The "do nothing" arm is trivially 0% by construction, because the measurement is deterministic — a policy that got no gradient step reproduces the broken numbers exactly. **Just explain that in one sentence instead of running it.** | none |
+| **9** | Costs a framing change. | Do not say the system **chooses** which repair to try. It has picked the same option every single time, and one of its three branches has never activated. You can still say it **escalates** correctly when a repair fails — that is demonstrated. |
+| **10** | Costs a generality claim. | Do not say the detector is **perturbation-agnostic** or "works for environment changes" in general. Say it works for *this* change: flipping an agent's sense of where its partner is. |
+| **11** | Costs the attention claim. | Do not describe the system as learning **who to listen to**, or as using attention in any meaningful sense. With 2 agents that component provably does nothing. Either drop the claim or state plainly that the mechanism is scaffolding for 3+ agents and is currently inert. |
+
+**The short version:** items 1, 3, 4, 6 and 8 are the paper. Items 2 and 7 make it solid. Items
+5, 9, 10 and 11 are each worth a sentence in a "limitations" section if you cannot get to them —
+which is a perfectly respectable place for them to be, as long as the corresponding claim is not
+made anywhere else in the paper.
+
 ## What's required next, in priority order
 
 These eleven are the minimum needed before any of the results above can be trusted or
