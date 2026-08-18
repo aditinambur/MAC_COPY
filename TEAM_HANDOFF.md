@@ -251,21 +251,46 @@ points.**
 🔴 **MUST HAVE**
 The system's normal fix only retrains the small part of the network responsible for
 communication — what an agent says and what its messages mean. The comparison version
-retrains a different, similarly small part of the network that has nothing to do with
-communication, as a fairness check. If the generic fix works just as well, that would mean
-the recovery isn't really about "fixing communication" — it would just show that
-retraining *any* similar-sized piece helps. On the one test so far, the real fix did
-slightly better, but not by enough to be sure it's a real difference and not luck.
+retrains a different, similarly small part that has nothing to do with communication, as a
+fairness check. If the generic fix works just as well, the recovery isn't really about
+"fixing communication" — it would just show that retraining *any* similar-sized piece helps.
+
+**Where this stands: 3 for 3, and the real fix won every time.** On one agent the generic
+fix was rejected immediately. On the other two it *passed* its own test and then failed the
+fresh-episode re-check — badly, at −2.7% and −50.9% recovery. The communication fix passed
+on all three, fresh episodes included.
+
+Worth noticing: two of those three failures are **invisible without the fresh-episode
+check**. They looked like successes on the episodes used to judge them. If you skip that
+check, this comparison will read as a tie.
+
+Run it on all 8 agents (`--repair_target noncomm`). This is the claim that the recovery is
+specifically about communication, so it needs the full set.
 
 **5. Run the "naive trigger" comparison the same number of times, on the same starting
 points.**  
 🔴 **MUST HAVE**
 This is the project's main claim: that being selective about *when* to fix
-communication — only stepping in when communication itself looks like the problem — is
-better than a blunt version that fixes things whenever the score drops, for any reason.
-Right now the smart version and the naive version made the exact same call on the one test
-we ran, so there's currently zero evidence this claim is true. It might be — we just
-haven't tested a case where the two versions would actually disagree yet.
+communication — only stepping in when communication itself looks like the problem — beats a
+blunt version that fixes things whenever the score drops, for any reason.
+
+**Where this stands: 3 for 3.** On all three agents the smart version spotted the problem
+and produced a fix that held up on fresh episodes, while the naive version did nothing at
+all.
+
+**But read the margins before relying on it.** The naive version triggers when the score
+drops by 30%. Our three agents came in at drops of 0.2995, 0.2981 and 0.2406 — so it stayed
+silent by **0.0005**, **0.0019** and **0.0594**. The first two are close enough to be luck;
+a nudge either way and they flip. Only the third is a margin you can defend.
+
+So when running the remaining agents, **record the drop ratio for every one**, and report
+this as "the two disagreed on k of n agents, and the smart one was right each time" with
+the margins listed. Do not report it as a flat win.
+
+One thing you cannot control: this comparison only tells you anything when the drop lands
+between 0.15 and 0.30. Above that both versions react and you learn nothing; below it,
+neither does. Expect roughly half the agents to be uninformative here — which is part of why
+item 2 asks for 8.
 
 **6. Put all of those results together and check if the differences are real, not just
 luck.**  
