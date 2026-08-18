@@ -65,6 +65,59 @@ for real, not just on paper.
   repair the agents are worse at the *unbroken* version of the game — by 17.3% in the worst
   case so far. The bigger the fix, the bigger the cost. Any write-up should say so.
 
+## The claims the paper will make — and what each one needs
+
+This is what the experiments are *for*. Every run should be recorded with one of these in mind;
+if a run does not feed one of these rows, it is probably not worth doing.
+
+### Ready to claim, needs more runs to be statistically solid
+
+| # | claim | evidence so far | what it still needs |
+|---|---|---|---|
+| **C1** | We can measure, causally, whether communication actually helps — not just correlate it | built and used throughout | nothing — this is a method contribution |
+| **C2** | We can break communication specifically, without breaking the task | navigation stays intact, only partner-belief is corrupted | nothing — method contribution |
+| **C3** | The detector is *selective*: it fires only when performance drops **and** communication is the likely cause | declined 2 weak agents; forcing repair on them produced fixes that failed validation, so the refusal was right | more agents (items 2–3) |
+| **C4** | The repair recovers communication benefit | 3 of 3 agents accepted, all 3 confirmed on fresh episodes | ≥5 agents (items 2–3, 6) |
+| **C5** | The recovery is **specifically** about communication, not just retraining something | 3 of 3 against the same-sized non-communication fix | ≥5 agents (item 4) |
+| **C6** | Deciding *when* to repair using communication beats deciding on score alone | 3 of 3 — the naive version never fired | ≥5 agents **and** at least one more comfortable margin (item 5) |
+| **C7** | Recovering the score is **not the same as** repairing communication | one clean case: reward recovered *above* baseline while communication came back only 18.2%, and the system rejected it | one or two more cases would make it a pattern rather than an anecdote |
+| **C8** | Judging a repair on the same episodes used to pick it is not enough | 2 fixes passed their own test and then failed on fresh episodes | comes free with items 3–5 |
+
+### Why C7 matters more than it looks
+
+C7 is the answer to the obvious question *"why not just use the score?"* — which is a question
+about this project's entire reason for existing.
+
+In that run the agents ended up **better than they started** on score (−1728.5 against a starting
+−1797.8) while communication was still mostly broken (18.2% recovered). They had found another
+way to do the task without fixing the messages. **A system that judged on score alone would have
+called this a complete success.** Ours rejected it.
+
+Without a case like this, "we measure communication causally" is an unmotivated design choice.
+With it, it is a demonstrated necessity. If you get more cases like it while running items 3–5,
+**record them** — they are worth more than another routine success.
+
+### Cannot be claimed *yet* — and which item unlocks each
+
+None of these is permanently out of reach. Each is blocked by one item on the list below, and
+finishing that item makes the claim **testable**.
+
+| ✗ claim | why not yet | unlocked by |
+|---|---|---|
+| the system **chooses** which repair to apply | it has picked the same option every time; one of its three branches has never activated | **item 8** — breaks at varying strengths, so the chooser has a real choice to make |
+| agents learn **who to listen to** (attention) | with 2 agents that component provably does nothing — zero gradient, unchanged across 2M training steps | **item 10** — 3 agents, where the mechanism is no longer trivial |
+| the detector works for **environment changes in general** | only one kind of break has been tested | **item 9** — a second, different kind of break |
+| any of C4–C7 is **statistically established** | 3 results from 2 training runs; a sign test gives p = 0.125 | **item 6** — more agents, then the statistics |
+
+> **Testable is not the same as proven.** Finishing an item gives you the chance to make the
+> claim, not the claim itself. Item 8 might show the chooser picks the same option at *every*
+> break strength — that is a finding, but it means you still cannot say the system chooses.
+> Item 10 makes attention mathematically non-trivial with 3 agents, but it might still fail to
+> learn anything useful. Plan for either outcome; both are reportable.
+
+**One more thing to state plainly rather than leave to be found:** the repair costs performance
+on the original, unbroken task — up to −17.3%, and more the larger the fix.
+
 ## Where things stand right now
 
 Everything below was run on the **current** code. Earlier runs on the old communication code
