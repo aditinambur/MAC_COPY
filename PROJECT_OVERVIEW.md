@@ -49,6 +49,36 @@ reject decision and the rule-based controller that chooses *which* repair to run
 §5.8). What remains is strengthening the *evidence* behind the mechanism — control arms
 at real budget, multiple seeds — see §9.
 
+### What "online repair" means here, and where it would be used
+
+The term is used in two senses in this document, and they are worth separating.
+
+- **The repair is online.** It fixes an already-trained agent *in place*, using fresh
+  experience collected from the changed environment, rather than discarding it and retraining
+  from scratch. `RepairRunner.repair()` runs real PPO rollouts in the perturbed world.
+- **The pipeline around it is offline.** `phase2_3_repair.py` is a standalone script run once
+  against a checkpoint loaded from disk: measure baseline → apply the change → detect →
+  repair → accept or roll back → exit. It is deliberately not wired into the training loop.
+
+A *fully* online version — watching a live agent, detecting drift over a rolling window,
+repairing on the fly with cooldowns and hysteresis — is not built; see §9.4.
+
+**Where this is useful.** The setting is: a multi-agent system is already deployed and working,
+something about the world changes, and retraining from scratch is too slow or too expensive.
+
+| situation | what breaks |
+|---|---|
+| **Sensor drift or replacement** | a robot's camera is recalibrated and its readings shift; the learned protocol was built on the old readings |
+| **Sim-to-real transfer** | a protocol learned in simulation degrades on physical hardware |
+| **A software or hardware update** | agents perceive the same world differently than they did when the protocol was learned |
+| **Partner replacement** | one agent is swapped for a different model that encodes things differently |
+
+There is also a diagnostic use that does not involve repairing anything: even run purely as a
+monitor, the fingerprint answers *"has the communication in this deployed system stopped being
+useful?"* — a question reward alone cannot answer, since reward can hold up while communication
+quietly stops contributing (§5.12 records a repair that recovered reward above baseline while
+restoring only 18.2% of the communication benefit).
+
 **Scenario / setup this project targets:**
 
 - Environment: **MPE `simple_spread`** (cooperative navigation)
