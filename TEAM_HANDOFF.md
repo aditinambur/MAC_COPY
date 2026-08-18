@@ -125,7 +125,7 @@ have been retired and are not counted anywhere.
 
 | # | what it is | tier | status |
 |---|---|---|---|
-| **1** | replace the broken "best agent" picker | 🔴 must | **do this first** — everything else depends on it |
+| **1** | replace the broken "best agent" picker | 🔴 must | do first if you can — but a manual method works, so you are **not blocked** on it |
 | **2** | train 8 usable agents, from 8 separate runs | 🔴 must | have 2 runs of the 8 needed |
 | **3** | run the full system on every agent | 🔴 must | 3 agents repaired and confirmed, from 2 runs |
 | **4** | compare against the "generic fix" | 🔴 must | **3 for 3** — the real fix won every time |
@@ -186,10 +186,22 @@ breakdowns, etc.) comes after these, not alongside them.
 **1. Design a replacement for the broken "best agent" picker.**  
 🔴 **MUST HAVE**
 
-*Do this before any of the experiments below.* It is about half a day of work, and
-skipping it means doing eight manual checkpoint sweeps by hand and risking that someone
-runs a full set of experiments on a weak agent without noticing. Everything from item 3
-onward depends on picking the right agent to test.
+*Listed first because it makes everything after it faster and safer.* About half a day of
+work.
+
+> **You are not blocked on this.** There is a manual method that already works — it is how
+> all three of our current agents were found, and it is written out at the end of this item.
+> If you are short on time, **skip straight to item 2 and use the manual method**, then come
+> back to this if there is slack.
+>
+> The honest trade: fixing the picker costs about **4 hours of someone's time**; doing it
+> manually for 8 agents costs about **2 hours of compute**, which runs unattended alongside
+> training. On time alone the manual route is cheaper.
+>
+> The real reason to fix it is **risk**, not time: if someone forgets and points
+> `--model_dir` at `checkpoint_best`, they will run a full three-arm set on a weak agent and
+> the result will look normal while being meaningless. That has already caused us to draw the
+> wrong conclusion twice about whether a training run had failed.
 
 At the end of training the system saves what it thinks is the best version of the agent into a
 folder called `checkpoint_best`. **It has now picked badly in two of three runs**, and both times
@@ -207,10 +219,12 @@ it buried the best agent that run actually produced:
 This is not bad luck. The score takes a running maximum across 60–90 noisy evaluations, so one
 early fluke wins permanently and is never revisited.
 
-**This item is not "check it by hand" — that is only the stopgap.** For now, sweep the 3–4
-checkpoints with the highest `causal_influence_kl_mean` from that run's `causal_influence.csv`,
-run each with `--no_repair`, and pick using the thresholds in item 2. Budget ~4 minutes per
-candidate.
+**The manual method — use this until the picker is fixed, and it is fine to use it for the
+whole campaign if you are short on time.** Open that run's `causal_influence.csv`, take the
+3–4 checkpoints with the highest `causal_influence_kl_mean`, run each with `--no_repair`, and
+pick using the thresholds in item 2. Budget ~4 minutes per candidate, ~16 minutes per agent.
+This is exactly how all three of our current agents were found, so it is a proven procedure,
+not guesswork.
 
 **What is actually needed is a better rule.** Some options worth trying and comparing against the
 hand-picked answer on the three runs we already have (where we know which checkpoint is right):
