@@ -54,6 +54,59 @@ class R_MAPPOPolicy:
         update_linear_schedule(self.actor_optimizer, episode, episodes, self.lr)
         update_linear_schedule(self.critic_optimizer, episode, episodes, self.critic_lr)
 
+    def _apply_attention_aggregation(self, messages):
+        """
+        Aggregate sender-wise messages for each receiver using receiver-specific attention.
+
+        :param messages: torch.Tensor shaped [batch_size, num_agents, message_dim], where
+                         each row contains all senders' messages for one receiver.
+        :return: torch.Tensor shaped [batch_size, message_dim]
+        """
+        bsz, n_agents, message_dim = messages.shape
+        if n_agents <= 1:
+            return torch.zeros(bsz, message_dim, device=messages.device, dtype=messages.dtype)
+
+        recv_idx = torch.arange(bsz, device=messages.device) % n_agents
+        recv_attention = self.attention_weight.to(device=messages.device, dtype=messages.dtype)[recv_idx]
+        att_logits = torch.einsum('bsd,bd->bs', messages, recv_attention)
+
+        self_mask = torch.eye(n_agents, device=messages.device, dtype=messages.dtype)[recv_idx]
+        att_logits = att_logits.masked_fill(self_mask.bool(), float("-inf"))
+
+        att_weights = torch.softmax(att_logits, dim=1)
+        return torch.einsum('bs,bsd->bd', att_weights, messages)
+
+    def _recompute_agent_messages_from_prev_share_obs(self, prev_share_obs):
+        """
+        Recompute sender messages from previous centralized observations so PPO gradients
+        flow into the communication pathway during updates.
+        """
+        prev_share_obs = torch.as_tensor(prev_share_obs, dtype=torch.float32, device=self.device)
+        prev_share_obs = torch.nan_to_num(prev_share_obs, nan=0.0, posinf=1.0, neginf=-1.0)
+        batch_size = prev_share_obs.shape[0]
+
+        if self.num_agents <= 1 or self.actor.message_head is None:
+            return torch.zeros(
+                batch_size,
+                self.actor.message_dim,
+                device=self.device,
+                dtype=prev_share_obs.dtype,
+            )
+
+        prev_obs_per_agent = prev_share_obs.view(batch_size, self.num_agents, self.actor.obs_dim)
+        token_logits = self.actor.message_head(prev_obs_per_agent)
+        token_probs = torch.softmax(token_logits, dim=-1)
+        all_messages = torch.matmul(token_probs, self.actor.token_embedding.weight)
+        recv_idx = torch.arange(batch_size, device=all_messages.device) % self.num_agents
+        recv_attention = self.attention_weight.to(device=all_messages.device, dtype=all_messages.dtype)[recv_idx]
+        att_logits = torch.einsum('bsd,bd->bs', all_messages, recv_attention)
+
+        self_mask = torch.eye(self.num_agents, device=all_messages.device, dtype=all_messages.dtype)[recv_idx]
+        att_logits = att_logits.masked_fill(self_mask.bool(), float("-inf"))
+
+        att_weights = torch.softmax(att_logits, dim=1)
+        return torch.einsum('bs,bsd->bd', att_weights, all_messages)
+
     def _prepare_agent_messages(self, messages, obs_batch_size=None):
         """
         Convert shared agent messages to flattened per-agent aggregated messages.
@@ -85,22 +138,7 @@ class R_MAPPOPolicy:
             # Each row corresponds to a receiver agent; infer receiver index from row order and
             # aggregate messages from all other senders.
             if obs_batch_size is not None and bsz == obs_batch_size:
-                if n_agents > 1:
-                    recv_idx = torch.arange(bsz, device=messages.device) % n_agents
-
-                    # Attention-based aggregation: each receiver agent learns which
-                    # senders to trust, instead of plain mean pooling.
-                    attention_weight = self.attention_weight.to(device=messages.device, dtype=messages.dtype)
-                    att_logits = torch.einsum('bij,ji->bi', messages, attention_weight.t())
-
-                    self_mask = torch.eye(n_agents, device=messages.device, dtype=messages.dtype)[recv_idx]
-                    att_logits = att_logits + (self_mask - 1) * 1e9
-
-                    att_weights = torch.softmax(att_logits, dim=1)
-                    agent_messages = torch.einsum('bi,bij->bj', att_weights, messages)
-                else:
-                    agent_messages = torch.zeros(bsz, message_dim, device=messages.device, dtype=messages.dtype)
-                return agent_messages
+                return self._apply_attention_aggregation(messages)
 
             # Case B: [n_envs, n_agents, message_dim], already per-agent tensors, flatten only.
             return messages.reshape(bsz * n_agents, message_dim)
@@ -210,7 +248,11 @@ class R_MAPPOPolicy:
         :return dist_entropy: (torch.Tensor) action distribution entropy for the given inputs.
         """
         obs_batch_size = obs.shape[0] if hasattr(obs, "shape") else None
-        agent_messages = self._prepare_agent_messages(messages, obs_batch_size=obs_batch_size)
+        if prev_share_obs is not None and self.actor.message_head is not None:
+            agent_messages = self._recompute_agent_messages_from_prev_share_obs(prev_share_obs)
+            prev_share_obs = None
+        else:
+            agent_messages = self._prepare_agent_messages(messages, obs_batch_size=obs_batch_size)
 
         action_log_probs, dist_entropy = self.actor.evaluate_actions(obs,
                                                                      rnn_states_actor,
@@ -221,7 +263,8 @@ class R_MAPPOPolicy:
                                          agent_messages,
                                          prev_share_obs)
 
-        values, _ = self.critic(cent_obs, rnn_states_critic, masks, agent_messages)
+        critic_messages = agent_messages.detach() if agent_messages is not None else None
+        values, _ = self.critic(cent_obs, rnn_states_critic, masks, critic_messages)
         return values, action_log_probs, dist_entropy
 
     def act(self, obs, rnn_states_actor, masks, available_actions=None, deterministic=False):
