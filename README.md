@@ -2,6 +2,43 @@
 
 This repository provides a research framework for studying **emergent communication** in multi-agent reinforcement learning (MARL) environments. It supports a variety of on-policy algorithms and environments, enabling the exploration of how communication protocols arise, evolve, and can be interpreted in cooperative and competitive multi-agent settings.
 
+---
+
+## ⚠️ This fork: Causal Mechanistic Emergent Language with Online Repair
+
+This is a **research fork**. The capstone work lives in the `mappo` → `r_mappo` stack on MPE
+`simple_spread` with 2 agents — roughly 85% of the upstream repo (SMAC, Hanabi, traffic
+junction, transformers) is unused here.
+
+Two MAPPO agents learn a discrete-token communication channel. The system measures **causally**
+whether messages help, breaks communication with a controlled observation perturbation, detects
+the degradation, and automatically selects, applies and accepts-or-rejects an online repair.
+
+### Read these first, in order
+
+| doc | what it is |
+|---|---|
+| **[PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)** | the authoritative design doc — what is implemented, how to run it, and all validated results (§5.9–§5.12) |
+| **[TEAM_HANDOFF.md](TEAM_HANDOFF.md)** | what is done, what is still needed, in priority order — **start here if you are picking up the experiments** |
+| **[REFRAME.md](REFRAME.md)** | how the original three-layer plan maps onto what was actually built |
+
+### Quick start
+
+```bash
+conda activate marl          # required — the base env will not work
+export KMP_DUPLICATE_LIB_OK=TRUE
+
+# detect-and-repair on a trained agent (~14 min)
+python onpolicy/scripts/phase2_3_repair.py   --env_name MPE --scenario_name simple_spread --algorithm_name mappo --seed 1   --n_rollout_threads 32 --n_eval_rollout_threads 1   --model_dir onpolicy/scripts/results/MPE/simple_spread/mappo/phase2_3_seed1/run1/models/checkpoint_1958400   --measure_episodes 6 --mirror_scope partner_full --repair_iters 15
+```
+
+Three trained agents and all experiment logs are committed under
+`onpolicy/scripts/results/.../phase2_3_seed*/` and `results/`. See §7.1 of the overview for
+which checkpoints to use — and **do not use `checkpoint_best/` without checking which step it
+resolves to** (§5.12).
+
+---
+
 ## Key Features
 
 - **On-Policy MARL Algorithms**: Includes implementations of algorithms such as MAPPO with communication.

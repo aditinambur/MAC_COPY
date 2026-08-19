@@ -159,15 +159,20 @@ class R_MAPPO():
 
         policy_loss = policy_action_loss
 
+        actor_params = list(self.policy.actor.parameters())
+        attention_weight = getattr(self.policy, "attention_weight", None)
+        if attention_weight is not None and attention_weight.requires_grad:
+            actor_params = actor_params + [attention_weight]
+
         self.policy.actor_optimizer.zero_grad()
 
         if update_actor:
             (policy_loss - dist_entropy * self.entropy_coef).backward()
 
         if self._use_max_grad_norm:
-            actor_grad_norm = nn.utils.clip_grad_norm_(self.policy.actor.parameters(), self.max_grad_norm)
+            actor_grad_norm = nn.utils.clip_grad_norm_(actor_params, self.max_grad_norm)
         else:
-            actor_grad_norm = get_gard_norm(self.policy.actor.parameters())
+            actor_grad_norm = get_gard_norm(actor_params)
 
         self.policy.actor_optimizer.step()
 

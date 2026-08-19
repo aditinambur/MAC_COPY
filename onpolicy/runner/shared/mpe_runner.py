@@ -20,6 +20,13 @@ class MPERunner(Runner):
         # Phase 3: Initialize message buffers
         self.latest_messages = None
         self.latest_aggregated_messages = None
+        self.latest_policy_messages = None
+
+        # Best-checkpoint tracking (for capturing a strong policy for Phase 2/3).
+        self.best_eval_score = -np.inf
+        self.latest_eval_normal_reward = None
+        self.latest_eval_comm_effect = None
+        self.latest_eval_value_sensitivity = None
 
     def run(self):
         self.warmup()   
@@ -87,8 +94,42 @@ class MPERunner(Runner):
             if episode % self.eval_interval == 0 and self.use_eval:
                 self.eval(total_num_steps)
 
+                # Capture a permanent named snapshot at every eval, plus a rolling "best"
+                # snapshot, so a strong communication-reliant policy can be recovered later
+                # for Phase 2 (degradation detection) / Phase 3 (online repair).
+                self.save(tag=total_num_steps)
+                if self.latest_eval_normal_reward is not None:
+                    # Selection score rewards all three signals Phase 2/3 depend on: return,
+                    # communication benefit (comm_effect), and critic value-sensitivity to
+                    # messages. The 100x weight puts value-sensitivity (~O(1)) on a comparable
+                    # scale to reward/comm_effect (~O(100s)), so a strong-reward-but-weak-comm
+                    # snapshot does not win over a balanced one.
+                    score = self.latest_eval_normal_reward
+                    if self.latest_eval_comm_effect is not None:
+                        score = score + max(0.0, self.latest_eval_comm_effect)
+                    if self.latest_eval_value_sensitivity is not None:
+                        score = score + 100.0 * self.latest_eval_value_sensitivity
+                    if score > self.best_eval_score:
+                        self.best_eval_score = score
+                        # Writes checkpoint_best/ (stable, always the current best) and a
+                        # sliding window of checkpoint_best_<steps>/ folders, both loadable
+                        # directly via --model_dir. See Runner.save_best.
+                        self.save_best(tag=total_num_steps,
+                                       keep=getattr(self.all_args, "best_keep", 3))
+                        print("[CKPT] New best eval at step {} (reward={:.1f}, comm_effect={}, value_sens={}) "
+                              "-> saved best_*.pt (same weights also in checkpoint_{}/)".format(
+                                  total_num_steps,
+                                  self.latest_eval_normal_reward,
+                                  "n/a" if self.latest_eval_comm_effect is None else "{:.1f}".format(self.latest_eval_comm_effect),
+                                  "n/a" if self.latest_eval_value_sensitivity is None else "{:.3f}".format(self.latest_eval_value_sensitivity),
+                                  total_num_steps))
+
     def _log_messages(self, episode, step):
         """Persist communication tensors for debugging under scripts/results/.../messages."""
+        # Debug-only and very I/O heavy (2 files per env-step); off unless explicitly requested.
+        if not getattr(self.all_args, "save_messages", False):
+            return
+
         messages = getattr(self, "latest_messages", None)
         aggregated_messages = getattr(self, "latest_aggregated_messages", None)
 
@@ -107,6 +148,10 @@ class MPERunner(Runner):
         # Phase 3: Initialize zero messages for the first step
         # so agents can start using communication from step 0
         message_dim = self.all_args.hidden_size  # Message embeddings have same dim as hidden layer
+        self.latest_policy_messages = np.zeros(
+            (self.n_rollout_threads * self.num_agents, self.num_agents, message_dim),
+            dtype=np.float32,
+        )
         self.latest_aggregated_messages = np.zeros((self.n_rollout_threads, self.num_agents, message_dim), 
                                                dtype=np.float32)
 
@@ -126,11 +171,8 @@ class MPERunner(Runner):
         
         # Phase 3: Reshape aggregated messages for actor input if available
         messages_input = None
-        if hasattr(self, 'latest_aggregated_messages') and self.latest_aggregated_messages is not None:
-            # latest_aggregated_messages shape: [n_envs, n_agents, message_dim]
-            # Reshape for batched policy call: [n_envs*n_agents, message_dim]
-            n_envs, n_agents, message_dim = self.latest_aggregated_messages.shape
-            messages_input = self.latest_aggregated_messages.reshape(n_envs * n_agents, message_dim)
+        if hasattr(self, 'latest_policy_messages') and self.latest_policy_messages is not None:
+            messages_input = self.latest_policy_messages
         
         
         policy_out = self.trainer.policy.get_actions(np.concatenate(self.buffer.share_obs[step]),
@@ -178,6 +220,16 @@ class MPERunner(Runner):
         # Optional debug visibility for message passing.
         self.latest_messages = messages
         self.latest_aggregated_messages = aggregated_messages
+        if messages is not None:
+            if self.all_args.disable_messages:
+                self.latest_policy_messages = np.zeros(
+                    (self.n_rollout_threads * self.num_agents, self.num_agents, messages.shape[-1]),
+                    dtype=np.float32,
+                )
+            else:
+                self.latest_policy_messages = self._build_receiver_message_tensor(messages)
+        else:
+            self.latest_policy_messages = None
         self.action_input_aggregated_messages = aggregated_messages  # Store aggregated for replay consistency
 
         # [self.envs, agents, dim]
@@ -234,6 +286,18 @@ class MPERunner(Runner):
             except Exception:
                 pass
 
+    @staticmethod
+    def _build_receiver_message_tensor(messages):
+        """
+        Expand per-env sender messages so each receiver gets the full sender set.
+
+        :param messages: np.ndarray shaped [n_envs, n_agents, message_dim]
+        :return: np.ndarray shaped [n_envs * n_agents, n_agents, message_dim]
+        """
+        n_envs, n_agents, msg_dim = messages.shape
+        sender_messages = np.repeat(messages[:, None, :, :], n_agents, axis=1)
+        return sender_messages.reshape(n_envs * n_agents, n_agents, msg_dim).astype(np.float32, copy=False)
+
     @torch.no_grad()
     def _eval_with_intervention(self, intervention_type='normal', crn_seed=None):
         """
@@ -259,13 +323,16 @@ class MPERunner(Runner):
 
         # Initialize messages (zero for first step, like warmup)
         message_dim = self.all_args.hidden_size
-        eval_aggregated_messages = np.zeros((self.n_eval_rollout_threads * self.num_agents, message_dim), dtype=np.float32)
+        eval_policy_messages = np.zeros(
+            (self.n_eval_rollout_threads * self.num_agents, self.num_agents, message_dim),
+            dtype=np.float32,
+        )
 
         for eval_step in range(self.episode_length):
             self.trainer.prep_rollout()
             
             # CAUSAL INTERVENTION: applied to the incoming aggregated message BEFORE the policy.
-            messages_for_policy = eval_aggregated_messages.copy()
+            messages_for_policy = eval_policy_messages.copy()
             if intervention_type == 'no_messages':
                 messages_for_policy = np.zeros_like(messages_for_policy)
             elif intervention_type == 'noisy':
@@ -346,17 +413,13 @@ class MPERunner(Runner):
                 msg_dim = eval_messages.shape[-1]
                 
                 messages_reshaped = eval_messages.reshape(n_envs, n_agents, msg_dim)
-                eval_aggregated_messages_per_agent = np.zeros_like(messages_reshaped)
-                
-                for agent_i in range(n_agents):
-                    mask = np.ones(n_agents, dtype=bool)
-                    mask[agent_i] = False
-                    eval_aggregated_messages_per_agent[:, agent_i, :] = messages_reshaped[:, mask, :].mean(axis=1)
-                
-                eval_aggregated_messages = eval_aggregated_messages_per_agent.reshape(n_envs * n_agents, msg_dim)
+                eval_policy_messages = self._build_receiver_message_tensor(messages_reshaped)
             else:
                 # No messages available, reset to zeros
-                eval_aggregated_messages = np.zeros((self.n_eval_rollout_threads * self.num_agents, message_dim), dtype=np.float32)
+                eval_policy_messages = np.zeros(
+                    (self.n_eval_rollout_threads * self.num_agents, self.num_agents, message_dim),
+                    dtype=np.float32,
+                )
 
         return np.array(eval_episode_rewards)
 
@@ -382,7 +445,7 @@ class MPERunner(Runner):
             return kl
 
     @torch.no_grad()
-    def _eval_causal_influence(self):
+    def _eval_causal_influence(self, crn_seed=None):
         """
         Causal Influence of Communication (CIC): for each agent, measure the effect of an
         intervention that ablates (zeroes) its incoming aggregated message on (a) its action
@@ -397,10 +460,13 @@ class MPERunner(Runner):
         n_agents = self.num_agents
         message_dim = self.all_args.hidden_size
 
+        if crn_seed is not None:
+            self._seed_eval_envs(crn_seed)
+
         eval_obs = self.eval_envs.reset()
         eval_rnn_states = np.zeros((n_envs, *self.buffer.rnn_states.shape[2:]), dtype=np.float32)
         eval_masks = np.ones((n_envs, n_agents, 1), dtype=np.float32)
-        eval_aggregated_messages = np.zeros((n_envs * n_agents, message_dim), dtype=np.float32)
+        eval_policy_messages = np.zeros((n_envs * n_agents, n_agents, message_dim), dtype=np.float32)
 
         kl_sums = np.zeros(n_agents, dtype=np.float64)
         value_sensitivity_sums = np.zeros(n_agents, dtype=np.float64)
@@ -417,16 +483,16 @@ class MPERunner(Runner):
                 cent_obs = obs
             rnn_states = np.concatenate(eval_rnn_states)
             masks = np.concatenate(eval_masks)
-            zero_messages = np.zeros_like(eval_aggregated_messages)
+            zero_messages = np.zeros_like(eval_policy_messages)
 
             # CAUSAL INTERVENTION: ablate each agent's incoming message and measure the effect
             # on its action distribution and value estimate, without altering the trajectory.
-            dist_real = self.trainer.policy.get_action_distribution(obs, rnn_states, masks, messages=eval_aggregated_messages)
+            dist_real = self.trainer.policy.get_action_distribution(obs, rnn_states, masks, messages=eval_policy_messages)
             dist_zero = self.trainer.policy.get_action_distribution(obs, rnn_states, masks, messages=zero_messages)
             kl = self._action_kl(dist_real, dist_zero).detach().cpu().numpy().reshape(n_envs, n_agents)
             kl_sums += kl.sum(axis=0)
 
-            values_real = self.trainer.policy.get_values(cent_obs, rnn_states, masks, messages=eval_aggregated_messages)
+            values_real = self.trainer.policy.get_values(cent_obs, rnn_states, masks, messages=eval_policy_messages)
             values_zero = self.trainer.policy.get_values(cent_obs, rnn_states, masks, messages=zero_messages)
             value_delta = (values_real - values_zero).abs().detach().cpu().numpy().reshape(n_envs, n_agents)
             value_sensitivity_sums += value_delta.sum(axis=0)
@@ -434,7 +500,7 @@ class MPERunner(Runner):
             # Advance the trajectory using the normal (non-intervened) policy.
             policy_out = self.trainer.policy.get_actions(
                 cent_obs, obs, rnn_states, rnn_states, masks,
-                deterministic=True, messages=eval_aggregated_messages)
+                deterministic=True, messages=eval_policy_messages)
 
             if len(policy_out) == 6:
                 _, eval_action, _, eval_rnn_states_new, _, eval_messages_out = policy_out
@@ -467,14 +533,9 @@ class MPERunner(Runner):
 
             if eval_messages is not None:
                 messages_reshaped = eval_messages.reshape(n_envs, n_agents, message_dim)
-                eval_aggregated_messages_per_agent = np.zeros_like(messages_reshaped)
-                for agent_i in range(n_agents):
-                    mask = np.ones(n_agents, dtype=bool)
-                    mask[agent_i] = False
-                    eval_aggregated_messages_per_agent[:, agent_i, :] = messages_reshaped[:, mask, :].mean(axis=1)
-                eval_aggregated_messages = eval_aggregated_messages_per_agent.reshape(n_envs * n_agents, message_dim)
+                eval_policy_messages = self._build_receiver_message_tensor(messages_reshaped)
             else:
-                eval_aggregated_messages = np.zeros((n_envs * n_agents, message_dim), dtype=np.float32)
+                eval_policy_messages = np.zeros((n_envs * n_agents, n_agents, message_dim), dtype=np.float32)
 
         kl_mean = kl_sums / self.episode_length
         value_sensitivity_mean = value_sensitivity_sums / self.episode_length
@@ -547,12 +608,17 @@ class MPERunner(Runner):
 
         normal_returns = np.array(normal_returns)
         eval_env_infos['eval_normal_rewards'] = np.mean(normal_returns, axis=0)
+        # Scalar summaries used by run() for best-checkpoint selection (Phase 2/3 needs a
+        # policy that both scores well AND visibly relies on communication).
+        self.latest_eval_normal_reward = float(np.mean(normal_returns))
+        self.latest_eval_comm_effect = None
 
         if run_no_msg:
             no_msg_returns = np.array(no_msg_returns)
             eval_env_infos['eval_no_message_rewards'] = np.mean(no_msg_returns, axis=0)
             # CRN-controlled causal effect of communication on return (paired per episode).
             eval_env_infos['eval_comm_effect_vs_no_message'] = np.mean(normal_returns - no_msg_returns, axis=0)
+            self.latest_eval_comm_effect = float(np.mean(normal_returns - no_msg_returns))
 
         if run_noisy:
             noisy_returns = np.array(noisy_returns)
@@ -566,6 +632,9 @@ class MPERunner(Runner):
             causal_influence_infos = self._eval_causal_influence()
             eval_env_infos.update(causal_influence_infos)
             self._save_causal_influence_csv(causal_influence_infos, total_num_steps)
+            # Expose value-sensitivity for best-checkpoint selection (Phase 2 keys on it).
+            self.latest_eval_value_sensitivity = float(
+                np.asarray(causal_influence_infos['causal_influence_value_sensitivity_mean']).reshape(-1)[0])
 
         # Print and log results
         print("\n[EVAL RESULTS]")

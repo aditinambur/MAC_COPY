@@ -149,19 +149,85 @@ class Runner(object):
         self.buffer.after_update()
         return train_infos
 
-    def save(self):
-        """Save policy's actor and critic networks."""
-        policy_actor = self.trainer.policy.actor
-        torch.save(policy_actor.state_dict(), str(self.save_dir) + "/actor.pt")
-        policy_critic = self.trainer.policy.critic
-        torch.save(policy_critic.state_dict(), str(self.save_dir) + "/critic.pt")
+    def save(self, tag=None):
+        """
+        Save policy's actor and critic networks.
+        :param tag: (str or None) if given, weights are written to a `checkpoint_<tag>/`
+                    subfolder (a permanent named snapshot) instead of overwriting the rolling
+                    actor.pt / critic.pt. Used to capture a specific good episode for Phase 2/3.
+        """
+        if tag is not None:
+            ckpt_dir = os.path.join(str(self.save_dir), "checkpoint_{}".format(tag))
+            os.makedirs(ckpt_dir, exist_ok=True)
+            save_dir = ckpt_dir
+        else:
+            save_dir = str(self.save_dir)
+        torch.save(self.trainer.policy.actor.state_dict(), os.path.join(save_dir, "actor.pt"))
+        torch.save(self.trainer.policy.critic.state_dict(), os.path.join(save_dir, "critic.pt"))
+        # Persist the learnable attention weights too, so a restored policy reproduces the
+        # exact message aggregation it was evaluated with.
+        attn = getattr(self.trainer.policy, "attention_weight", None)
+        if attn is not None:
+            torch.save(attn.detach().cpu(), os.path.join(save_dir, "attention_weight.pt"))
 
-    def save_best(self):
-        """Save policy's actor and critic networks."""
-        policy_actor = self.trainer.policy.actor
-        torch.save(policy_actor.state_dict(), str(self.save_dir) + "/best_actor.pt")
-        policy_critic = self.trainer.policy.critic
-        torch.save(policy_critic.state_dict(), str(self.save_dir) + "/best_critic.pt")
+    def _write_checkpoint_dir(self, path):
+        """Write actor/critic/attention_weight into `path` under the exact filenames restore() expects."""
+        os.makedirs(path, exist_ok=True)
+        torch.save(self.trainer.policy.actor.state_dict(), os.path.join(path, "actor.pt"))
+        torch.save(self.trainer.policy.critic.state_dict(), os.path.join(path, "critic.pt"))
+        attn = getattr(self.trainer.policy, "attention_weight", None)
+        if attn is not None:
+            torch.save(attn.detach().cpu(), os.path.join(path, "attention_weight.pt"))
+
+    def _prune_best_checkpoints(self, keep):
+        """
+        Keep only the `keep` most recent checkpoint_best_<steps>/ folders, deleting older ones.
+
+        Only ever removes directories in save_dir whose name matches checkpoint_best_<digits>
+        exactly -- the naming this class writes itself. checkpoint_best/ (no suffix) and the
+        per-eval checkpoint_<steps>/ history are never touched.
+        """
+        import re
+        import shutil
+        if keep is None or keep <= 0:
+            return
+        pattern = re.compile(r"^checkpoint_best_(\d+)$")
+        found = []
+        for name in os.listdir(str(self.save_dir)):
+            m = pattern.match(name)
+            if m and os.path.isdir(os.path.join(str(self.save_dir), name)):
+                found.append((int(m.group(1)), name))
+        for _, name in sorted(found, reverse=True)[keep:]:
+            shutil.rmtree(os.path.join(str(self.save_dir), name), ignore_errors=True)
+
+    def save_best(self, tag=None, keep=None):
+        """
+        Save the best-so-far snapshot, in three forms:
+
+        1. `best_actor.pt` / `best_critic.pt` / `best_attention_weight.pt` -- flat files, kept
+           for backwards compatibility. restore() CANNOT load these (it looks for actor.pt).
+        2. `checkpoint_best/` -- overwritten every time a new best appears. A stable path that
+           always holds the current best and can be passed straight to --model_dir.
+        3. `checkpoint_best_<tag>/` -- a new folder per best, so the progression is inspectable.
+           Pruned to the `keep` most recent (sliding window) so long runs don't accumulate
+           dozens of snapshots.
+
+        :param tag: (int or None) step count, used to name the per-best folder. Omit to write
+                    only forms 1 and 2.
+        :param keep: (int or None) sliding-window size for form 3. None/<=0 disables pruning.
+        """
+        torch.save(self.trainer.policy.actor.state_dict(), str(self.save_dir) + "/best_actor.pt")
+        torch.save(self.trainer.policy.critic.state_dict(), str(self.save_dir) + "/best_critic.pt")
+        attn = getattr(self.trainer.policy, "attention_weight", None)
+        if attn is not None:
+            torch.save(attn.detach().cpu(), str(self.save_dir) + "/best_attention_weight.pt")
+
+        # Directly loadable forms.
+        self._write_checkpoint_dir(os.path.join(str(self.save_dir), "checkpoint_best"))
+        if tag is not None:
+            self._write_checkpoint_dir(
+                os.path.join(str(self.save_dir), "checkpoint_best_{}".format(tag)))
+            self._prune_best_checkpoints(keep)
 
     def restore(self):
         """Restore policy's networks from a saved model."""
@@ -170,6 +236,11 @@ class Runner(object):
         if not self.all_args.use_render:
             policy_critic_state_dict = torch.load(str(self.model_dir) + '/critic.pt')
             self.policy.critic.load_state_dict(policy_critic_state_dict)
+        # Restore learnable message-aggregation weights if the snapshot has them.
+        attn_path = os.path.join(str(self.model_dir), "attention_weight.pt")
+        if os.path.exists(attn_path) and getattr(self.policy, "attention_weight", None) is not None:
+            with torch.no_grad():
+                self.policy.attention_weight.copy_(torch.load(attn_path).to(self.policy.attention_weight.device))
 
     def log_train(self, train_infos, total_num_steps):
         """

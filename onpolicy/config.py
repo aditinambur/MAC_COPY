@@ -233,7 +233,18 @@ def get_config():
         default=False, help='do not communicate')
     parser.add_argument("--disable_messages", action='store_true',
         default=False, help='disable aggregated messages during training for causal analysis')
-    
+    parser.add_argument("--save_messages", action='store_true',
+        default=False, help='dump per-step message tensors to <run_dir>/messages/*.npy (debug only). '
+                            'OFF by default: it writes 2 files per env-step and severely slows long '
+                            'runs once the directory holds hundreds of thousands of files.')
+
+    parser.add_argument("--best_keep", type=int, default=3,
+        help='how many checkpoint_best_<steps>/ folders to retain (sliding window). Every time '
+             'eval finds a new best policy it writes checkpoint_best/ (stable path, always the '
+             'current best) plus a dated checkpoint_best_<steps>/; only the newest --best_keep '
+             'of the latter are kept. Both are directly loadable via --model_dir. 0 disables '
+             'pruning and keeps every best snapshot.')
+
     # evaluation-only interventions for causal analysis
     parser.add_argument("--eval_disable_messages", action='store_true',
         default=False, help='disable aggregated messages during evaluation for causal analysis')
