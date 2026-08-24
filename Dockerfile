@@ -20,7 +20,13 @@ COPY api/requirements_api.txt ./api/
 # Install basic dependencies.
 # - Pin numpy<2 to avoid breaking changes in NumPy 2.0 (e.g., AttributeError: np.float_)
 # - Pin wandb<0.17 to avoid Go compiler requirements
+# - Pin protobuf<=3.20.3 to prevent descriptor check errors
+ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+ENV WANDB_MODE=disabled
+ENV WANDB_SILENT=true
+
 RUN pip install --no-cache-dir \
+    "protobuf<=3.20.3" \
     "numpy<2" \
     gym==0.19.0 \
     pygame \
@@ -35,7 +41,7 @@ RUN pip install --no-cache-dir \
     setproctitle \
     imageio \
     Pillow \
-    pyglet
+    "pyglet<=1.5.27"
 
 # Install FastAPI backend API requirements
 RUN pip install --no-cache-dir -r api/requirements_api.txt

@@ -3,7 +3,12 @@ import os
 import numpy as np
 import torch
 from onpolicy.runner.shared.base_runner import Runner
-import wandb
+try:
+    # pyrefly: ignore [missing-import]
+    import wandb
+except Exception:
+    wandb = None
+# pyrefly: ignore [missing-import]
 import imageio
 
 def _t2n(x):
@@ -631,7 +636,16 @@ class MPERunner(Runner):
             print("\n[EVAL] Measuring causal influence of communication...")
             causal_influence_infos = self._eval_causal_influence()
             eval_env_infos.update(causal_influence_infos)
-            self._save_causal_influence_csv(causal_influence_infos, total_num_steps)
+
+            csv_metrics = dict(causal_influence_infos)
+            if 'eval_normal_rewards' in eval_env_infos:
+                csv_metrics['eval_reward'] = np.array([float(np.mean(eval_env_infos['eval_normal_rewards']))])
+            if 'eval_comm_effect_vs_no_message' in eval_env_infos:
+                csv_metrics['comm_effect'] = np.array([float(np.mean(eval_env_infos['eval_comm_effect_vs_no_message']))])
+            elif 'eval_comm_effect_vs_noisy' in eval_env_infos:
+                csv_metrics['comm_effect'] = np.array([float(np.mean(eval_env_infos['eval_comm_effect_vs_noisy']))])
+
+            self._save_causal_influence_csv(csv_metrics, total_num_steps)
             # Expose value-sensitivity for best-checkpoint selection (Phase 2 keys on it).
             self.latest_eval_value_sensitivity = float(
                 np.asarray(causal_influence_infos['causal_influence_value_sensitivity_mean']).reshape(-1)[0])

@@ -1,9 +1,14 @@
 #!/usr/bin/env python
 import sys
 import os
-import wandb
-import socket
-import setproctitle
+try:
+    import wandb
+except Exception:
+    wandb = None
+try:
+    import setproctitle
+except Exception:
+    setproctitle = None
 import numpy as np
 from pathlib import Path
 import torch
@@ -97,7 +102,7 @@ def main(args):
         os.makedirs(str(run_dir))
 
     # wandb
-    if all_args.use_wandb:
+    if all_args.use_wandb and wandb is not None:
         run = wandb.init(config=all_args,
                          project=all_args.env_name,
                          entity=all_args.user_name,
@@ -110,20 +115,32 @@ def main(args):
                          job_type="training",
                          reinit=True)
     else:
-        if not run_dir.exists():
+        run = None
+
+    if not run_dir.exists():
+        curr_run = 'run1'
+    else:
+        exst_run_nums = []
+        for folder in run_dir.iterdir():
+            if folder.is_dir() and str(folder.name).startswith('run'):
+                try:
+                    num = int(str(folder.name).split('run')[1])
+                    has_models = (folder / "models").exists() or (folder / "causal_influence.csv").exists()
+                    if has_models:
+                        exst_run_nums.append(num)
+                except ValueError:
+                    pass
+        if len(exst_run_nums) == 0:
             curr_run = 'run1'
         else:
-            exst_run_nums = [int(str(folder.name).split('run')[1]) for folder in run_dir.iterdir() if str(folder.name).startswith('run')]
-            if len(exst_run_nums) == 0:
-                curr_run = 'run1'
-            else:
-                curr_run = 'run%i' % (max(exst_run_nums) + 1)
-        run_dir = run_dir / curr_run
-        if not run_dir.exists():
-            os.makedirs(str(run_dir))
+            curr_run = 'run%i' % (max(exst_run_nums) + 1)
+    run_dir = run_dir / curr_run
+    if not run_dir.exists():
+        os.makedirs(str(run_dir))
 
-    setproctitle.setproctitle(str(all_args.algorithm_name) + "-" + \
-        str(all_args.env_name) + "-" + str(all_args.experiment_name) + "@" + str(all_args.user_name))
+    if setproctitle is not None:
+        setproctitle.setproctitle(str(all_args.algorithm_name) + "-" + \
+            str(all_args.env_name) + "-" + str(all_args.experiment_name) + "@" + str(all_args.user_name))
 
     # seed
     torch.manual_seed(all_args.seed)
@@ -158,7 +175,7 @@ def main(args):
     if all_args.use_eval and eval_envs is not envs:
         eval_envs.close()
 
-    if all_args.use_wandb:
+    if all_args.use_wandb and wandb is not None:
         run.finish()
     else:
         runner.writter.export_scalars_to_json(str(runner.log_dir + '/summary.json'))
