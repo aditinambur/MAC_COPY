@@ -10,7 +10,6 @@ RODE
 *.egg-info
 wandb
 .vscode
-api
 logs
 .nfs*
 *.so
