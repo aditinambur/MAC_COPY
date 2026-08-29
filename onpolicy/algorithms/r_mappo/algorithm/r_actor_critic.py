@@ -60,6 +60,14 @@ class R_Actor(nn.Module):
 
         self.to(device)
 
+    def enable_lora(self, r=4, lora_alpha=8.0):
+        from onpolicy.algorithms.utils.lora import inject_lora_to_actor
+        return inject_lora_to_actor(self, r=r, lora_alpha=lora_alpha)
+
+    def disable_lora(self):
+        from onpolicy.algorithms.utils.lora import eject_lora_from_actor
+        eject_lora_from_actor(self)
+
     def forward(self, obs, rnn_states, masks, available_actions=None, deterministic=False, messages=None):
         """
         Compute actions from the given inputs.

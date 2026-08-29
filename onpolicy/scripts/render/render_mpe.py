@@ -1,10 +1,18 @@
 #!/usr/bin/env python
 import sys
 import os
-import wandb
+try:
+    # pyrefly: ignore [missing-import]
+    import wandb
+except Exception:
+    wandb = None
 import socket
-import setproctitle
 import numpy as np
+try:
+    # pyrefly: ignore [missing-import]
+    import setproctitle
+except Exception:
+    setproctitle = None
 from pathlib import Path
 
 import torch
@@ -53,6 +61,10 @@ def main(args):
         assert (all_args.use_recurrent_policy or all_args.use_naive_recurrent_policy), ("check recurrent policy!")
     elif all_args.algorithm_name == "macppo" or all_args.algorithm_name == "memo_ppo":
         assert (all_args.use_recurrent_policy or all_args.use_naive_recurrent_policy), ("check recurrent policy!")
+    elif all_args.algorithm_name == "mappo":
+        all_args.use_recurrent_policy = False
+        all_args.use_naive_recurrent_policy = False
+        assert (all_args.use_recurrent_policy == False and all_args.use_naive_recurrent_policy == False), ("check recurrent policy!")
     elif all_args.algorithm_name == "mappo_comm":
         assert (all_args.use_recurrent_policy == False and all_args.use_naive_recurrent_policy == False), (
             "check recurrent policy!")
@@ -88,6 +100,7 @@ def main(args):
         os.makedirs(str(run_dir))
     
     # wandb
+    all_args.use_wandb = False
     if all_args.use_wandb:
         run = wandb.init(config=all_args,
                          project=all_args.env_name,
@@ -113,8 +126,43 @@ def main(args):
         if not run_dir.exists():
             os.makedirs(str(run_dir))
 
-    setproctitle.setproctitle(str(all_args.algorithm_name) + "-" + \
-        str(all_args.env_name) + "-" + str(all_args.experiment_name) + "@" + str(all_args.user_name))
+    if setproctitle is not None:
+        setproctitle.setproctitle(str(all_args.algorithm_name) + "-" + \
+            str(all_args.env_name) + "-" + str(all_args.experiment_name) + "@" + str(all_args.user_name))
+
+    # Auto-detect num_agents and num_landmarks from checkpoint and CSV if present
+    if all_args.model_dir:
+        actor_candidates = [
+            os.path.join(str(all_args.model_dir), "actor.pt"),
+            os.path.join(str(all_args.model_dir), "checkpoint_best", "actor.pt")
+        ]
+        actor_path = next((p for p in actor_candidates if os.path.exists(p)), None)
+        if actor_path:
+            try:
+                sd = torch.load(actor_path, map_location="cpu")
+                # Look for causal_influence.csv
+                csv_candidates = [
+                    os.path.join(str(all_args.model_dir), "..", "causal_influence.csv"),
+                    os.path.join(str(all_args.model_dir), "causal_influence.csv"),
+                    os.path.join(str(all_args.gif_dir), "causal_influence.csv") if getattr(all_args, "gif_dir", None) else None
+                ]
+                for cp in csv_candidates:
+                    if cp and os.path.exists(cp):
+                        with open(cp, "r") as f:
+                            header = f.readline().strip().split(",")
+                            agent_cols = [c for c in header if c.startswith("causal_influence_kl_agent")]
+                            if agent_cols:
+                                all_args.num_agents = len(agent_cols)
+                                break
+
+                if "message_head.weight" in sd:
+                    obs_dim = sd["message_head.weight"].shape[1]
+                    calc_landmarks = (obs_dim - 4 - 4 * (all_args.num_agents - 1)) // 2
+                    if calc_landmarks > 0:
+                        all_args.num_landmarks = calc_landmarks
+                print(f"[RENDER] Auto-configured for checkpoint: num_agents={all_args.num_agents}, num_landmarks={all_args.num_landmarks}")
+            except Exception as e:
+                print(f"[RENDER WARNING] Checkpoint shape inspection error: {e}")
 
     # seed
     torch.manual_seed(all_args.seed)

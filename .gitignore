@@ -10,7 +10,6 @@ RODE
 *.egg-info
 wandb
 .vscode
-api
 logs
 .nfs*
 *.so
@@ -18,3 +17,5 @@ logs
 *.png
 *ubyte
 *.gz
+node_modules/
+frontend/dist/

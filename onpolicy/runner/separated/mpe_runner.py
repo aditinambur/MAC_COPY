@@ -1,13 +1,19 @@
     
 import time
-import wandb
+try:
+    # pyrefly: ignore [missing-import]
+    import wandb
+except Exception:
+    wandb = None
 import os
 import numpy as np
 from itertools import chain
 import torch
 
 from onpolicy.utils.util import update_linear_schedule
+# pyrefly: ignore [missing-import]
 from onpolicy.runner.separated.base_runner import Runner
+# pyrefly: ignore [missing-import]
 import imageio
 
 def _t2n(x):

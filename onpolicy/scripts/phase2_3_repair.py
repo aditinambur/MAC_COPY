@@ -85,6 +85,25 @@ def _wrap_perturbed_env(venv, all_args, mirror_idx):
 class RepairRunner(MPERunner):
     """MPERunner extended with Phase 2 measurement/detection and Phase 3 online repair."""
 
+    def __init__(self, config):
+        super(RepairRunner, self).__init__(config)
+        if getattr(self.all_args, 'lora_rank', 0) > 0:
+            from onpolicy.algorithms.utils.lora import inject_lora_to_actor
+            inject_lora_to_actor(
+                self.trainer.policy.actor,
+                r=self.all_args.lora_rank,
+                lora_alpha=self.all_args.lora_alpha
+            )
+            # Ensure optimizer includes LoRA parameters alongside base parameters
+            actor = self.trainer.policy.actor
+            attn = getattr(self.trainer.policy, "attention_weight", None)
+            attn_params = [attn] if attn is not None else []
+            self.trainer.policy.actor_optimizer = torch.optim.Adam(
+                list(actor.parameters()) + attn_params,
+                lr=self.all_args.lr, eps=self.all_args.opti_eps,
+                weight_decay=self.all_args.weight_decay
+            )
+
     # -- Phase 2: measurement -------------------------------------------------
     @torch.no_grad()
     def measure_comm_metrics(self, n_episodes, base_seed):
@@ -136,22 +155,14 @@ class RepairRunner(MPERunner):
                          message aggregation, and the rest of the policy fixed. This is the
                          purest "repair the message embeddings' meaning" mechanism.
           - 'comm':      message_head + token_embedding + attention_weight -- repair what to
-                         say and what it means. attention_weight is included for
-                         forward-compatibility with >2 agents; with exactly 2 agents (the only
-                         configuration this repo currently trains) it does NOT learn "who to
-                         trust" -- see the num_agents==2 note printed at startup and in
-                         PRIORITY-1B below. Do not describe 'comm' repair as repairing trust
-                         weighting while num_agents==2.
+                         say and what it means.
+          - 'lora':      LoRA adapter parameters (lora_A, lora_B) on actor trunk + action heads,
+                         along with message_head + token_embedding + attention_weight. Keeps base
+                         weights frozen while enabling expressive parameter-efficient adaptation.
           - 'full':      the entire actor (+ attention_weight) -- a full policy re-train.
           - 'noncomm':   PRIORITY 8 control arm. Trains ONLY act.action_out (the actor's final
                          action-decoding linear layer), which is NOT part of the communication
-                         pathway, and leaves attention_weight untouched. Roughly comparable in
-                         parameter count to 'comm' (both are small: a few hundred parameters
-                         each -- the exact counts are logged below so "comparable-sized" is
-                         checkable, not assumed). Used to test whether recovery from repair is
-                         actually attributable to repairing communication, or whether generic
-                         fine-tuning of an equally-sized, non-communication actor slice recovers
-                         just as much.
+                         pathway, and leaves attention_weight untouched.
         The critic is always trainable so value estimates stay calibrated for stable PPO; it
         is the value function, not part of the communication channel.
         """
@@ -159,16 +170,27 @@ class RepairRunner(MPERunner):
         if target == 'full':
             for p in actor.parameters():
                 p.requires_grad = True
+        elif target == 'lora':
+            from onpolicy.algorithms.utils.lora import set_actor_lora_trainable
+            set_actor_lora_trainable(actor, trainable_comm=True)
         else:
+            for m in actor.modules():
+                if hasattr(m, 'lora_A') and m.lora_A is not None:
+                    m.lora_A.requires_grad = False
+                if hasattr(m, 'lora_B') and m.lora_B is not None:
+                    m.lora_B.requires_grad = False
+
             keys = {'embedding': ('token_embedding',),
                     'comm': ('message_head', 'token_embedding'),
                     'noncomm': ('action_out',)}[target]
             for name, p in actor.named_parameters():
+                if 'lora' in name:
+                    continue
                 p.requires_grad = any(k in name for k in keys)
         for p in self.trainer.policy.critic.parameters():
             p.requires_grad = True
         if getattr(self.trainer.policy, "attention_weight", None) is not None:
-            self.trainer.policy.attention_weight.requires_grad = (target in ('comm', 'full'))
+            self.trainer.policy.attention_weight.requires_grad = (target in ('comm', 'lora', 'full'))
 
     def _restore_all_trainable(self):
         for p in self.trainer.policy.actor.parameters():
@@ -333,14 +355,15 @@ def detect_degradation_reward_only(baseline, current, reward_drop_ratio_threshol
 
 
 def select_repair_target(baseline, degraded, severe_reward_ratio, sharp_value_sens_ratio,
-                         order=('embedding', 'comm', 'full')):
+                         order=('embedding', 'comm', 'lora', 'full')):
     """
     PRIORITY 2: deterministic, rule-based controller (NOT a learned meta-controller) that picks
     an initial repair target from the fingerprint pattern, so target selection stops being a
     manually-typed CLI flag. Rules (thresholds are configurable, not claimed to be optimal):
 
       1. reward collapsed badly (drop >= severe_reward_ratio of |baseline reward|)
-             -> escalate straight to 'full'
+             -> if 'lora' in order: start parameter-efficient repair with 'lora'
+             -> else: escalate straight to 'full'
       2. value_sensitivity dropped sharply (degraded <= sharp_value_sens_ratio * baseline)
              -> start minimal with 'embedding' (policy/critic still barely see the message;
                 a full re-train risks losing everything else the actor learned)
@@ -359,6 +382,10 @@ def select_repair_target(baseline, degraded, severe_reward_ratio, sharp_value_se
     value_sens_ratio = degraded['value_sensitivity'] / max(1e-6, baseline['value_sensitivity'])
 
     if reward_drop_ratio >= severe_reward_ratio:
+        if 'lora' in order:
+            return 'lora', (
+                "reward dropped significantly ({:.0%} of baseline, >= {:.0%} threshold) "
+                "-> start parameter-efficient repair with LoRA".format(reward_drop_ratio, severe_reward_ratio))
         return 'full', (
             "reward collapsed by {:.0%} of baseline magnitude (>= {:.0%} threshold) "
             "-> escalate directly to full".format(reward_drop_ratio, severe_reward_ratio))
@@ -419,24 +446,34 @@ def accept_repair(baseline, degraded, repaired, reward_thresh, comm_thresh, epsi
 
 def run_causal_adaptive_repair(runner, baseline, degraded, all_args):
     """
-    PRIORITY 5: the closed loop. select target -> snapshot -> repair -> measure -> accept/
-    reject -> if rejected: rollback + escalate to the next-stronger target -> repeat.
+    Closed-loop repair:
+    select/start target -> snapshot -> repair -> measure -> accept/reject
+    -> rollback + escalate if required.
 
-    Escalation only ever moves UPWARD from wherever select_repair_target started (the "least
-    invasive valid ordering" per the spec) -- e.g. if the controller starts at 'comm' and it's
-    rejected, the next attempt is 'full', never back down to 'embedding'. If every attempt in
-    the remaining ladder is rejected, parameters are restored to the pre-repair snapshot and
-    the run reports no accepted repair.
+    Strategies:
+      threshold:
+          Uses the causal fingerprint selector with the repair ladder
+          embedding -> comm -> lora -> full.
+
+      minimum_first:
+          Preserves the original Task-8 comparison:
+          embedding -> comm -> full.
+          Starts from embedding and stops at the first accepted repair.
     """
-    order = ('embedding', 'comm', 'full')
+
     if all_args.repair_strategy == 'minimum_first':
+        order = ('embedding', 'comm', 'full')
+
         initial_target = 'embedding'
         reason = (
             "minimum-first strategy -> start with the least invasive repair "
             "and escalate embedding -> comm -> full only if needed"
         )
         attempt_targets = order
+
     else:
+        order = ('embedding', 'comm', 'lora', 'full')
+
         initial_target, reason = select_repair_target(
             baseline,
             degraded,
@@ -444,11 +481,14 @@ def run_causal_adaptive_repair(runner, baseline, degraded, all_args):
             sharp_value_sens_ratio=all_args.select_sharp_value_sens_ratio,
             order=order,
         )
+
         attempt_targets = order[order.index(initial_target):]
+
     print("\n[CONTROLLER]")
     print("  repair strategy       : {}".format(all_args.repair_strategy))
     print("  selected repair target: {}".format(initial_target))
     print("  reason: {}".format(reason))
+
     pre_repair_snapshot = runner._snapshot_repairable_state()
 
     repaired = None
@@ -708,15 +748,19 @@ def parse_args(args, parser):
                         help="CRN-paired episodes per condition when measuring a fingerprint.")
     parser.add_argument('--repair_iters', type=int, default=15,
                         help="number of PPO update iterations during online repair.")
+    parser.add_argument('--lora_rank', type=int, default=4,
+                        help="rank r for LoRA parameter-efficient adaptation (0 to disable).")
+    parser.add_argument('--lora_alpha', type=float, default=8.0,
+                        help="scaling factor alpha for LoRA adapters.")
     parser.add_argument('--repair_target', type=str, default=None,
-                        choices=['embedding', 'comm', 'full', 'noncomm'],
+                        choices=['embedding', 'comm', 'lora', 'full', 'noncomm'],
                         help="Default None: the causal controller (select_repair_target) picks "
                              "the target automatically from the fingerprint, with escalation on "
                              "rejection. Pass explicitly to BYPASS the controller and escalation "
                              "and run exactly one fixed-target repair attempt -- this is also how "
                              "the 'noncomm' (Priority 8) non-communication control arm is run, "
                              "since it is a control condition rather than part of the adaptive "
-                             "mechanism. 'embedding'/'comm'/'full' can still be forced this way "
+                             "mechanism. 'embedding'/'comm'/'lora'/'full' can still be forced this way "
                              "for manual ablation.")
     parser.add_argument('--detect_k_sigma', type=float, default=2.0,
                         help="sigma multiplier for the comm-benefit degradation band.")

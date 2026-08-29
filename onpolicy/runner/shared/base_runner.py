@@ -1,4 +1,7 @@
-import wandb
+try:
+    import wandb
+except Exception:
+    wandb = None
 import os
 import numpy as np
 import torch
@@ -38,7 +41,7 @@ class Runner(object):
         self.n_render_rollout_threads = self.all_args.n_render_rollout_threads
         self.use_linear_lr_decay = self.all_args.use_linear_lr_decay
         self.hidden_size = self.all_args.hidden_size
-        self.use_wandb = self.all_args.use_wandb
+        self.use_wandb = bool(self.all_args.use_wandb and wandb is not None and getattr(wandb, 'run', None) is not None)
         self.use_render = self.all_args.use_render
         self.recurrent_N = self.all_args.recurrent_N
 
@@ -51,7 +54,7 @@ class Runner(object):
         # dir
         self.model_dir = self.all_args.model_dir
 
-        if self.use_wandb:
+        if self.use_wandb and wandb.run is not None:
             self.save_dir = str(wandb.run.dir)
             self.run_dir = str(wandb.run.dir)
         else:
