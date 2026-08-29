@@ -471,8 +471,22 @@ def run_causal_adaptive_repair(runner, baseline, degraded, all_args):
         )
         attempt_targets = order
 
-    else:
+    elif all_args.repair_strategy == 'threshold_lora':
         order = ('embedding', 'comm', 'lora', 'full')
+
+        initial_target, reason = select_repair_target(
+            baseline,
+            degraded,
+            severe_reward_ratio=all_args.select_severe_reward_ratio,
+            sharp_value_sens_ratio=all_args.select_sharp_value_sens_ratio,
+            order=order,
+        )
+
+        attempt_targets = order[order.index(initial_target):]
+
+    else:
+        # Original Task-8 threshold controller.
+        order = ('embedding', 'comm', 'full')
 
         initial_target, reason = select_repair_target(
             baseline,
@@ -803,7 +817,7 @@ def parse_args(args, parser):
                              "triggering beats the naive alternative; never combine its trigger "
                              "logic with the causal controller's target selection.")
     parser.add_argument('--repair_strategy',type=str,default='threshold',
-                        choices=['threshold', 'minimum_first'],
+                        choices=['threshold', 'minimum_first', 'threshold_lora'],
                         help=("Repair ordering for the causal controller. "
                               "'threshold' uses select_repair_target() to choose the initial target. "
                               "'minimum_first' always tries embedding -> comm -> full, "
