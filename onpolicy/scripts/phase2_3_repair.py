@@ -48,7 +48,11 @@ from pathlib import Path
 from onpolicy.config import get_config
 from onpolicy.envs.mpe.MPE_env import MPEEnv
 from onpolicy.envs.env_wrappers import DummyVecEnv, SubprocVecEnv
-from onpolicy.envs.mirror_wrapper import MirrorObsVecEnv, compute_mirror_indices
+from onpolicy.envs.mirror_wrapper import (
+    MirrorObsVecEnv,
+    PartnerRotationObsVecEnv,
+    compute_mirror_indices,
+)
 from onpolicy.runner.shared.mpe_runner import MPERunner
 
 
@@ -66,6 +70,17 @@ def _make_mpe_vec_env(all_args, n_threads, seed_base):
         return DummyVecEnv([get_env_fn(0)])
     return SubprocVecEnv([get_env_fn(i) for i in range(n_threads)])
 
+def _wrap_perturbed_env(venv, all_args, mirror_idx):
+    """Apply either the legacy mirror or Task-8 rotation perturbation."""
+    if all_args.perturb_angle is None:
+        return MirrorObsVecEnv(venv, mirror_idx)
+
+    return PartnerRotationObsVecEnv(
+        venv,
+        num_agents=all_args.num_agents,
+        num_landmarks=all_args.num_landmarks,
+        angle_deg=all_args.perturb_angle,
+    )
 
 class RepairRunner(MPERunner):
     """MPERunner extended with Phase 2 measurement/detection and Phase 3 online repair."""
@@ -414,16 +429,26 @@ def run_causal_adaptive_repair(runner, baseline, degraded, all_args):
     the run reports no accepted repair.
     """
     order = ('embedding', 'comm', 'full')
-    initial_target, reason = select_repair_target(
-        baseline, degraded,
-        severe_reward_ratio=all_args.select_severe_reward_ratio,
-        sharp_value_sens_ratio=all_args.select_sharp_value_sens_ratio,
-        order=order)
+    if all_args.repair_strategy == 'minimum_first':
+        initial_target = 'embedding'
+        reason = (
+            "minimum-first strategy -> start with the least invasive repair "
+            "and escalate embedding -> comm -> full only if needed"
+        )
+        attempt_targets = order
+    else:
+        initial_target, reason = select_repair_target(
+            baseline,
+            degraded,
+            severe_reward_ratio=all_args.select_severe_reward_ratio,
+            sharp_value_sens_ratio=all_args.select_sharp_value_sens_ratio,
+            order=order,
+        )
+        attempt_targets = order[order.index(initial_target):]
     print("\n[CONTROLLER]")
+    print("  repair strategy       : {}".format(all_args.repair_strategy))
     print("  selected repair target: {}".format(initial_target))
     print("  reason: {}".format(reason))
-
-    attempt_targets = order[order.index(initial_target):]
     pre_repair_snapshot = runner._snapshot_repairable_state()
 
     repaired = None
@@ -465,6 +490,7 @@ def run_causal_adaptive_repair(runner, baseline, degraded, all_args):
 
     return {
         'mode': 'causal',
+        'repair_strategy': all_args.repair_strategy,
         'initial_target': initial_target,
         'initial_reason': reason,
         'accepted': accepted,
@@ -512,7 +538,9 @@ def _log_and_close(all_args, run_dir, baseline, degraded, detect_info, repaired,
         'env_name': all_args.env_name,
         'scenario_name': all_args.scenario_name,
         'mirror_scope': all_args.mirror_scope,
+        'perturb_angle': all_args.perturb_angle,
         'controller': all_args.controller,
+        'repair_strategy': all_args.repair_strategy,
         'repair_target_arg': all_args.repair_target,
         'repair_iters': all_args.repair_iters,
         # Comparing recovery numbers across different thread counts is invalid -- see the
@@ -672,6 +700,10 @@ def parse_args(args, parser):
                         choices=['all', 'partner', 'partner_full'],
                         help="which observation channels the environment change mirrors "
                              "(see mirror_wrapper.compute_mirror_indices).")
+    parser.add_argument('--perturb_angle',type=float,default=None,
+                        help=("Optional Task-8 partner-position rotation in degrees. "
+                              "0 = no perturbation, 180 = partner_full-equivalent. "
+                              "If omitted, the existing --mirror_scope behaviour is used."),)
     parser.add_argument('--measure_episodes', type=int, default=8,
                         help="CRN-paired episodes per condition when measuring a fingerprint.")
     parser.add_argument('--repair_iters', type=int, default=15,
@@ -726,6 +758,12 @@ def parse_args(args, parser):
                              "given, else 'comm'), no escalation. Exists to test whether causal "
                              "triggering beats the naive alternative; never combine its trigger "
                              "logic with the causal controller's target selection.")
+    parser.add_argument('--repair_strategy',type=str,default='threshold',
+                        choices=['threshold', 'minimum_first'],
+                        help=("Repair ordering for the causal controller. "
+                              "'threshold' uses select_repair_target() to choose the initial target. "
+                              "'minimum_first' always tries embedding -> comm -> full, "
+                              "stopping at the first accepted repair."))
     parser.add_argument('--reward_only_drop_ratio', type=float, default=0.30,
                         help="--controller reward_only trigger threshold: fraction of |baseline "
                              "reward| that must be lost to trigger repair.")
@@ -826,12 +864,18 @@ def main(args):
         run_dir = Path(all_args.run_dir)
     else:
         model_dir_path = Path(all_args.model_dir)
+        if all_args.repair_target is not None:
+            repair_label = all_args.repair_target
+        else:
+            repair_label = all_args.repair_strategy
+
         run_id = "{}_{}_seed{}_{}".format(
             all_args.controller,
-            all_args.repair_target if all_args.repair_target is not None else "auto",
+            repair_label,
             all_args.seed,
-            time.strftime("%Y%m%d_%H%M%S"))
-        run_dir = model_dir_path.parent / (model_dir_path.name + "_repair_runs") / run_id
+            time.strftime("%Y%m%d_%H%M%S"),
+        )
+        run_dir = (model_dir_path.parent / (model_dir_path.name + "_repair_runs") / run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     config = {
@@ -855,7 +899,10 @@ def main(args):
     print("run_dir         :", str(run_dir))
     print("env / scenario  :", all_args.env_name, "/", all_args.scenario_name)
     print("mirror scope    :", all_args.mirror_scope, "-> indices", mirror_idx)
+    if all_args.perturb_angle is not None:
+        print("Task-8 partner rotation :",all_args.perturb_angle,"degrees",)
     print("controller      :", all_args.controller)
+    print("repair strategy :", all_args.repair_strategy)
     print("repair target   :", all_args.repair_target if all_args.repair_target is not None
           else "(auto-selected by controller)")
     # n_rollout_threads controls how much experience repair() collects per PPO iteration --
@@ -885,7 +932,11 @@ def main(args):
     _print_fingerprint("BASELINE", baseline)
 
     # 2) Apply the environment change (one-sided mirror) and measure degradation.
-    runner.eval_envs = MirrorObsVecEnv(eval_envs, mirror_idx)
+    runner.eval_envs = _wrap_perturbed_env(
+    eval_envs,
+    all_args,
+    mirror_idx,
+    )   
     print("\n[2] Degraded fingerprint (mirrored environment):")
     degraded = runner.measure_comm_metrics(all_args.measure_episodes, base_seed)
     _print_fingerprint("DEGRADED", degraded)
@@ -922,7 +973,11 @@ def main(args):
         return
 
     # 4) Online repair on the mirrored environment.
-    runner.envs = MirrorObsVecEnv(envs, mirror_idx)
+    runner.envs = _wrap_perturbed_env(
+    envs,
+    all_args,
+    mirror_idx,
+    )
 
     if all_args.repair_target is not None:
         # PRIORITY 8 / manual override: exactly one fixed-target attempt, no controller,

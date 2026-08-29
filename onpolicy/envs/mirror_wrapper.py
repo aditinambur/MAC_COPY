@@ -90,3 +90,65 @@ class MirrorObsVecEnv:
     def __getattr__(self, name):
         # Only reached for attributes not found on the wrapper itself.
         return getattr(self.venv, name)
+
+class PartnerRotationObsVecEnv:
+    """
+    Rotate only the perceived relative positions of other agents.
+
+    angle_deg = 0   -> unchanged observation
+    angle_deg = 180 -> equivalent to partner_full for partner positions
+
+    Distance to the partner is preserved; only perceived direction changes.
+    """
+
+    def __init__(
+        self,
+        venv,
+        num_agents,
+        num_landmarks,
+        angle_deg,
+        dim_p=2,
+    ):
+        self.venv = venv
+        self.angle_deg = float(angle_deg)
+        self.angle_rad = np.deg2rad(self.angle_deg)
+
+        if dim_p != 2:
+            raise ValueError(
+                "PartnerRotationObsVecEnv currently requires dim_p=2"
+            )
+
+        # Observation:
+        # self_vel(2), self_pos(2),
+        # landmark positions,
+        # other-agent positions,
+        # communication
+        self.other_start = 2 * dim_p + num_landmarks * dim_p
+        self.other_end = (
+            self.other_start + (num_agents - 1) * dim_p
+        )
+
+    def _rotate(self, obs):
+        obs = np.array(obs, copy=True)
+
+        c = np.cos(self.angle_rad)
+        s = np.sin(self.angle_rad)
+
+        for i in range(self.other_start, self.other_end, 2):
+            x = obs[..., i].copy()
+            y = obs[..., i + 1].copy()
+
+            obs[..., i] = c * x - s * y
+            obs[..., i + 1] = s * x + c * y
+
+        return obs
+
+    def reset(self, *args, **kwargs):
+        return self._rotate(self.venv.reset(*args, **kwargs))
+
+    def step(self, *args, **kwargs):
+        obs, rews, dones, infos = self.venv.step(*args, **kwargs)
+        return self._rotate(obs), rews, dones, infos
+
+    def __getattr__(self, name):
+        return getattr(self.venv, name)
